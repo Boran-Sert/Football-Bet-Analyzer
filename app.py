@@ -19,6 +19,7 @@ from data_processor import (
     get_league_standings,
     get_standings_cache_key,
 )
+from data_fetcher import get_api_usage
 from analyzer import get_similar_matches_for_upcoming
 from ui_helpers import (
     inject_css,
@@ -151,9 +152,7 @@ def render_standings_tab(league: str, season: str, selected_match):
 
     # 1) Guncel sezon (her zaman en ustte)
     st.subheader(f"{league} Güncel Puan Durumu ({current})")
-    st.info(
-        "ℹ️ Not: Puan durumu günde iki kez (06:00 ve 18:00) yenilenir."
-    )
+    st.info("ℹ️ Not: Puan durumu günde iki kez (06:00 ve 18:00) yenilenir.")
     _show_standings(league, current, cache_key, selected_match)
 
     # 2) Secili gecmis sezon (guncel degilse goster)
@@ -209,6 +208,19 @@ def main():
 
     seasons = get_seasons()
     season = st.sidebar.selectbox("Gecmis Sezon:", seasons, index=1)
+
+    # API kota bilgisi
+    usage = get_api_usage()
+    if usage:
+        remaining = int(usage["remaining"])
+        used = int(usage["used"]) if usage["used"] != "?" else 0
+        total = remaining + used
+        pct = remaining / total if total > 0 else 0
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**🔑 API Kota Durumu**")
+        st.sidebar.progress(pct, text=f"{remaining} / {total} istek kaldi")
+        if remaining < 50:
+            st.sidebar.warning("⚠️ API kotaniz azaliyor!")
 
     st.sidebar.divider()
     st.sidebar.markdown(

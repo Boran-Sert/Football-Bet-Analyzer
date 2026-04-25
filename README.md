@@ -43,6 +43,22 @@ Bu uygulama, yaklaşan futbol maçlarının canlı oranlarını geçmiş sezonla
 - `analyzer.py`: Oran benzerlik motoru.
 - `config.py`: Konfigürasyon ve sabitler.
 
+## Canlı Yayın (Deployment)
+
+Bu uygulamayı **Streamlit Community Cloud** üzerinde ücretsiz olarak yayınlayabilirsiniz:
+
+1. Kodu GitHub deponuza yükleyin.
+2. [Streamlit Cloud](https://share.streamlit.io/) adresine gidin ve GitHub hesabınızla giriş yapın.
+3. **"New app"** butonuna tıklayın.
+4. Deponuzu (`Football-Bet-Analyzer`), dalı (`main`) ve ana dosyayı (`app.py`) seçin.
+5. **Kritik Adım (API Anahtarı):** 
+   - Sağ alt köşedeki **"Advanced settings..."** kısmına tıklayın veya uygulama kurulduktan sonra **"Settings > Secrets"** menüsüne gidin.
+   - Aşağıdaki satırı ekleyin:
+     ```toml
+     ODDS_API_KEY = "api_anahtariniz_buraya"
+     ```
+6. **"Deploy!"** butonuna tıklayın.
+
 ## Teknolojiler
 
 - [Python](https://www.python.org/)

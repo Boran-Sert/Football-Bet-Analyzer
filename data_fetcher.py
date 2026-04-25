@@ -163,6 +163,7 @@ def fetch_odds_api(league_name: str) -> list[dict]:
     # Kota takibi
     remaining = resp.headers.get("x-requests-remaining")
     if remaining is not None:
+        st.session_state["api_limit"] = remaining
         try:
             if int(remaining) < 10:
                 st.sidebar.warning(f"API kota uyarisi: {remaining} istek kaldi.")
@@ -170,3 +171,31 @@ def fetch_odds_api(league_name: str) -> list[dict]:
             pass
 
     return data
+
+
+def get_api_usage() -> dict | None:
+    """Kalan API kotasini kontrol et (ucretsiz /sports endpoint'i ile).
+
+    Returns:
+        {"remaining": str, "used": str} veya None (hata durumunda).
+    """
+    if not API_KEY:
+        return None
+
+    try:
+        resp = requests.get(
+            "https://api.the-odds-api.com/v4/sports/",
+            params={"apiKey": API_KEY},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception:
+        return None
+
+    remaining = resp.headers.get("x-requests-remaining")
+    used = resp.headers.get("x-requests-used")
+
+    if remaining is None:
+        return None
+
+    return {"remaining": remaining, "used": used or "?"}
