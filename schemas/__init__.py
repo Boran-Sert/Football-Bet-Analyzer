@@ -1,0 +1,1 @@
+"""schemas paket baslangic dosyasi."""

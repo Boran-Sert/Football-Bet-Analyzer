@@ -1,5 +1,10 @@
-streamlit
-pandas
-numpy
-requests
-python-dotenv
+fastapi
+uvicorn[standard]
+motor
+redis
+pydantic-settings
+apscheduler
+httpx
+bcrypt
+python-jose[cryptography]
+pydantic[email]
