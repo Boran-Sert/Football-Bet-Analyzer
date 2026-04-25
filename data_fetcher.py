@@ -173,7 +173,7 @@ def fetch_odds_api(league_name: str) -> list[dict]:
     return data
 
 
-def get_api_usage() -> dict | None:
+def get_api_usage():
     """Kalan API kotasini kontrol et (ucretsiz /sports endpoint'i ile).
 
     Returns:
