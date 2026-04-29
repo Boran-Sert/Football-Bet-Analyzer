@@ -36,7 +36,9 @@ class FootballAdapter(SportAdapter):
             try:
                 raw_home = event.get("home_team", "")
                 raw_away = event.get("away_team", "")
-                odds = self._extract_best_odds(event.get("bookmakers", []), raw_home, raw_away)
+                odds = self._extract_best_odds(
+                    event.get("bookmakers", []), raw_home, raw_away
+                )
                 entity = MatchEntity(
                     external_id=event["id"],
                     sport=self.sport,
@@ -55,13 +57,19 @@ class FootballAdapter(SportAdapter):
                 )
                 entities.append(entity)
             except (KeyError, ValueError) as exc:
-                logger.warning("Odds API event parse hatasi: %s — %s", exc, event.get("id", "?"))
+                logger.warning(
+                    "Odds API event parse hatasi: %s — %s", exc, event.get("id", "?")
+                )
                 continue
 
-        logger.info("FootballAdapter: %d upcoming event normalize edildi.", len(entities))
+        logger.info(
+            "FootballAdapter: %d upcoming event normalize edildi.", len(entities)
+        )
         return entities
 
-    def _extract_best_odds(self, bookmakers: list[dict], raw_home: str, raw_away: str) -> dict:
+    def _extract_best_odds(
+        self, bookmakers: list[dict], raw_home: str, raw_away: str
+    ) -> dict:
         """Tum bahiscilerden en iyi oranlari cikarir."""
         market_data: dict[str, dict[tuple[str, float | None], list[float]]] = {}
 
@@ -70,15 +78,15 @@ class FootballAdapter(SportAdapter):
                 mkey = market["key"]
                 if mkey not in ("h2h", "totals", "btts"):
                     continue
-                    
+
                 if mkey not in market_data:
                     market_data[mkey] = {}
-                
+
                 for outcome in market.get("outcomes", []):
                     name = outcome["name"]
                     price = outcome.get("price", 0.0)
                     point = outcome.get("point")
-                    
+
                     mapped_name = name.lower()
                     if name == raw_home:
                         mapped_name = "home"
@@ -86,7 +94,7 @@ class FootballAdapter(SportAdapter):
                         mapped_name = "away"
                     elif name.lower() == "draw":
                         mapped_name = "draw"
-                        
+
                     key_tuple = (mapped_name, point)
                     if key_tuple not in market_data[mkey]:
                         market_data[mkey][key_tuple] = []
@@ -96,7 +104,9 @@ class FootballAdapter(SportAdapter):
         for mkey, outcomes in market_data.items():
             avg_data[mkey] = {}
             for k, prices in outcomes.items():
-                avg_data[mkey][k] = round(sum(prices) / len(prices), 2) if prices else 0.0
+                avg_data[mkey][k] = (
+                    round(sum(prices) / len(prices), 2) if prices else 0.0
+                )
 
         result: dict = {}
         if "h2h" in avg_data:
@@ -129,7 +139,9 @@ class FootballAdapter(SportAdapter):
     #  CSV → MatchEntity
     # ══════════════════════════════════════════
 
-    def normalize_historical(self, raw_rows: list[dict], league_code: str = "") -> list[MatchEntity]:
+    def normalize_historical(
+        self, raw_rows: list[dict], league_code: str = ""
+    ) -> list[MatchEntity]:
         """Football-data.co.uk CSV satirlarini MatchEntity listesine donusturur."""
         entities: list[MatchEntity] = []
         league_key = LEAGUE_CODE_TO_API_KEY.get(league_code, f"csv_{league_code}")
@@ -145,7 +157,9 @@ class FootballAdapter(SportAdapter):
 
         return entities
 
-    def _parse_csv_row(self, row: dict, league_key: str, league_code: str) -> MatchEntity | None:
+    def _parse_csv_row(
+        self, row: dict, league_key: str, league_code: str
+    ) -> MatchEntity | None:
         """Tek bir CSV satirini MatchEntity'ye donusturur."""
         # TURKCE ve INGILIZCE header destegi (GUNCEL)
         date_str = row.get("Tarih") or row.get("Date") or ""
@@ -159,7 +173,9 @@ class FootballAdapter(SportAdapter):
         if not commence_time:
             return None
 
-        raw_id = f"{league_code}_{date_str}_{home}_{away}"
+        # Normalize date for ID generation (YYYY-MM-DD)
+        norm_date = commence_time.strftime("%Y-%m-%d")
+        raw_id = f"{league_code}_{norm_date}_{home}_{away}"
         external_id = hashlib.md5(raw_id.encode()).hexdigest()
 
         # Oranlar ve Metrikler
@@ -203,8 +219,12 @@ class FootballAdapter(SportAdapter):
             odds["h2h"] = {"home": h, "draw": dr, "away": a}
 
         # totals (Turkce: 2.5 Ust, 2.5 Alt | Ingilizce: B365>2.5, P>2.5)
-        over = self._safe_float(row.get("2.5 Ust") or row.get("B365>2.5") or row.get("P>2.5", ""))
-        under = self._safe_float(row.get("2.5 Alt") or row.get("B365<2.5") or row.get("P<2.5", ""))
+        over = self._safe_float(
+            row.get("2.5 Ust") or row.get("B365>2.5") or row.get("P>2.5", "")
+        )
+        under = self._safe_float(
+            row.get("2.5 Alt") or row.get("B365<2.5") or row.get("P<2.5", "")
+        )
 
         if over and under:
             odds["totals"] = {"over_2_5": over, "under_2_5": under}
@@ -226,8 +246,10 @@ class FootballAdapter(SportAdapter):
         # İlk Yarı Golleri (Turkce: HTHG, HTAG)
         hthg = self._safe_int(row.get("HTHG", ""))
         htag = self._safe_int(row.get("HTAG", ""))
-        if hthg is not None: metrics["home_ht_goals"] = hthg
-        if htag is not None: metrics["away_ht_goals"] = htag
+        if hthg is not None:
+            metrics["home_ht_goals"] = hthg
+        if htag is not None:
+            metrics["away_ht_goals"] = htag
 
         # Kartlar (Turkce: Sari Kart, Kirmizi Kart | Ingilizce: HY, AY, HR, AR)
         hy = self._safe_int(row.get("Ev Sahibi Sari Kart") or row.get("HY", ""))
@@ -252,14 +274,41 @@ class FootballAdapter(SportAdapter):
             metrics["away_corners"] = ac
             metrics["total_corners"] = hc + ac
 
+        # Sutlar (Ingilizce: HS, AS, HST, AST)
+        hs = self._safe_int(row.get("HS", ""))
+        as_ = self._safe_int(row.get("AS", ""))
+        if hs is not None and as_ is not None:
+            metrics["home_shots"] = hs
+            metrics["away_shots"] = as_
+            metrics["total_shots"] = hs + as_
+
+        hst = self._safe_int(row.get("HST", ""))
+        ast = self._safe_int(row.get("AST", ""))
+        if hst is not None and ast is not None:
+            metrics["home_shots_on_target"] = hst
+            metrics["away_shots_on_target"] = ast
+            metrics["total_shots_on_target"] = hst + ast
+
+        # Fauller (Ingilizce: HF, AF)
+        hf = self._safe_int(row.get("HF", ""))
+        af = self._safe_int(row.get("AF", ""))
+        if hf is not None and af is not None:
+            metrics["home_fouls"] = hf
+            metrics["away_fouls"] = af
+            metrics["total_fouls"] = hf + af
+
         return metrics
 
     @staticmethod
     def _safe_float(val: str) -> float | None:
-        try: return float(val.replace(",", ".")) if val else None
-        except: return None
+        try:
+            return float(val.replace(",", ".")) if val else None
+        except:
+            return None
 
     @staticmethod
     def _safe_int(val: str) -> int | None:
-        try: return int(float(val)) if val else None
-        except: return None
+        try:
+            return int(float(val)) if val else None
+        except:
+            return None

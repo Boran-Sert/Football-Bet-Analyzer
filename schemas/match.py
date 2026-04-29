@@ -96,6 +96,18 @@ class MatchMetrics(BaseModel):
     away_corners: int | None = None
     total_corners: int | None = None
     
+    home_shots: int | None = None
+    away_shots: int | None = None
+    total_shots: int | None = None
+    
+    home_shots_on_target: int | None = None
+    away_shots_on_target: int | None = None
+    total_shots_on_target: int | None = None
+    
+    home_fouls: int | None = None
+    away_fouls: int | None = None
+    total_fouls: int | None = None
+
     home_yellow: int | None = None
     away_yellow: int | None = None
     total_yellow: int | None = None

@@ -36,6 +36,18 @@ export interface MatchMetrics {
   away_corners?: number | null;
   total_corners?: number | null;
   
+  home_shots?: number | null;
+  away_shots?: number | null;
+  total_shots?: number | null;
+  
+  home_shots_on_target?: number | null;
+  away_shots_on_target?: number | null;
+  total_shots_on_target?: number | null;
+  
+  home_fouls?: number | null;
+  away_fouls?: number | null;
+  total_fouls?: number | null;
+  
   home_yellow?: number | null;
   away_yellow?: number | null;
   total_yellow?: number | null;
