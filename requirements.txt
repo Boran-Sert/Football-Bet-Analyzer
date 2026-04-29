@@ -6,8 +6,14 @@ pydantic-settings
 pydantic[email]
 apscheduler
 httpx
-passlib[bcrypt]
+passlib
+bcrypt==3.1.7
 python-jose[cryptography]
 python-multipart
 orjson
 aiofiles
+pytest
+pytest-asyncio
+pytest-mock
+PyJWT
+stripe

@@ -7,27 +7,23 @@ from pydantic import BaseModel, EmailStr, Field
 
 
 class UserTier(str, Enum):
-    """Kullanici katmani. Tier limitleri core/config.py TierLimits'te."""
     FREE = "free"
     PRO = "pro"
     ELITE = "elite"
 
 
 class UserCreate(BaseModel):
-    """Kayit istegi."""
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
     display_name: str = Field(..., min_length=2, max_length=50)
 
 
 class UserLogin(BaseModel):
-    """Giris istegi."""
     email: EmailStr
     password: str
 
 
 class UserInDB(BaseModel):
-    """MongoDB'deki kullanici dokumani."""
     id: str = Field(default="", alias="_id")
     email: str
     display_name: str
@@ -41,7 +37,6 @@ class UserInDB(BaseModel):
 
 
 class UserResponse(BaseModel):
-    """API yaniti — sifre haric."""
     id: str
     email: str
     display_name: str
@@ -52,7 +47,6 @@ class UserResponse(BaseModel):
 
 
 class TokenData(BaseModel):
-    """JWT payload."""
     user_id: str
     tier: UserTier
     is_superuser: bool = False
@@ -60,12 +54,30 @@ class TokenData(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    """Login/Register yaniti."""
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
 
 
 class EmailVerifyRequest(BaseModel):
-    """Email dogrulama token'i."""
     token: str
+
+
+# ── GAP 2: Password reset ─────────────────────────────────────────────────────
+
+class PasswordResetRequest(BaseModel):
+    """Forgot-password isteği — sadece email."""
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    """Reset-password isteği — token + yeni sifre."""
+    token: str
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+# ── GAP 3: Refresh token ──────────────────────────────────────────────────────
+
+class RefreshRequest(BaseModel):
+    """Token yenileme veya logout isteği."""
+    refresh_token: str

@@ -1,8 +1,4 @@
-"""Uygulama yapilandirmasi.
-
-Tum cevresel degiskenler Pydantic BaseSettings ile dogrulanir.
-Kullanici tier limitleri buradan merkezi olarak yonetilir.
-"""
+"""Uygulama yapilandirmasi."""
 
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -10,17 +6,6 @@ from typing import ClassVar
 
 
 class TierLimits:
-    """Kullanici katmani (tier) bazli limitler.
-
-    Bu sinifi degistirerek tum uygulamadaki tier limitlerini
-    tek noktadan yonetebilirsin.
-
-    Attributes:
-        similar_matches: Her tier icin max benzer mac sayisi.
-            -1 = sinirsiz
-        rate_limit_per_minute: Her tier icin dakikadaki istek limiti.
-    """
-
     similar_matches: ClassVar[dict[str, int]] = {
         "free": 3,
         "pro": 10,
@@ -33,25 +18,24 @@ class TierLimits:
         "elite": 1000,
     }
 
+    # Hard cap for superuser limit_override (GAP 5 fix)
+    superuser_max_limit: ClassVar[int] = 100
+
     @classmethod
     def get_similar_limit(cls, tier: str) -> int:
-        """Verilen tier icin max benzer mac limitini dondurur."""
         return cls.similar_matches.get(tier, cls.similar_matches["free"])
 
     @classmethod
     def get_rate_limit(cls, tier: str) -> int:
-        """Verilen tier icin dakika basina istek limitini dondurur."""
         return cls.rate_limit_per_minute.get(tier, cls.rate_limit_per_minute["free"])
 
 
 class Settings(BaseSettings):
-    """Uygulama ayarlari. .env dosyasindan otomatik yuklenir."""
-
-    # ── Veritabani ──
+    # ── Database ──
     MONGO_URI: str
     REDIS_URL: str = "redis://localhost:6379"
 
-    # ── Dis API Anahtarlari ──
+    # ── External APIs ──
     ODDS_API_KEY: str
     FOOTBALL_DATA_API_KEY: str = ""
 
@@ -65,13 +49,22 @@ class Settings(BaseSettings):
     RESEND_API_KEY: str = ""
     FRONTEND_URL: str = "http://localhost:3000"
 
-    # ── Scheduler (UTC saatleri — TR 17:00 = UTC 14:00, TR 21:00 = UTC 18:00) ──
+    # ── Stripe (GAP 4) ──────────────────────────────────────────────────────
+    # Get these from https://dashboard.stripe.com/apikeys
+    STRIPE_SECRET_KEY: str = ""
+    # Get this from https://dashboard.stripe.com/webhooks
+    STRIPE_WEBHOOK_SECRET: str = ""
+    # Get these from https://dashboard.stripe.com/products (after creating products)
+    STRIPE_PRICE_PRO: str = ""    # e.g. price_1ABC...
+    STRIPE_PRICE_ELITE: str = ""  # e.g. price_1XYZ...
+
+    # ── Scheduler ──
     SCHEDULER_SLOTS: list[dict] = [
         {"hour": 14, "minute": 0},
         {"hour": 18, "minute": 0},
     ]
 
-    # ── Aktif Sporlar ──
+    # ── Active sports ──
     ACTIVE_SPORTS: list[str] = Field(default=["football"])
 
     # ── CORS ──
@@ -94,8 +87,9 @@ class Settings(BaseSettings):
         "soccer_france_ligue_one", "soccer_france_ligue_two",
         "soccer_turkey_super_league",
         "soccer_netherlands_eredivisie",
-        "soccer_belgium_first_div"
+        "soccer_belgium_first_div",
     ]
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
@@ -103,5 +97,4 @@ class Settings(BaseSettings):
     }
 
 
-# Singleton settings nesnesi
 settings = Settings()

@@ -1,68 +1,86 @@
-"""Redis tabanli Rate Limiter bagimliligi."""
+"""Redis tabanli Sliding Window Rate Limiter — GAP 6.
 
-from fastapi import Request, HTTPException
+Onceki sorun (Fixed Window):
+  Dakika siniri her 60 saniyede bir sifirlaniyordu. Bu, bir kullanicinin
+  59. saniyede 60 istek yapip 61. saniyede 60 istek daha yapmasina izin
+  veriyordu: 2x burst oluyor ve limit anlamsizlasiyordu.
+
+Yeni yaklasim (Sliding Window — Redis Sorted Set):
+  Her istek, o anki timestamp ile bir sorted set'e eklenir.
+  "Son 60 saniye" penceresi her istekte dinamik olarak hesaplanir.
+  Esik asiminda HTTP 429 firlatilir.
+  Redis arizi durumunda fail-open (istege izin verilir).
+"""
+
 import time
 
+from fastapi import Request, HTTPException
 from core.config import TierLimits
 from core.redis_client import redis_manager
 from schemas.auth import UserTier
 
 
 class RateLimiter:
-    """Sliding window veya Fixed window Redis tabanli IP/User limitleme.
+    """Sliding window Redis rate limiter.
     
-    Bu bir FastAPI Dependency (Depends) olarak kullanilacaktir.
-    Eger user_tier verilmisse ona gore limit alir.
-    Verilmemisse IP bazli FREE tier limiti uygular.
+    Dependency olarak kullanilir: `dependencies=[Depends(RateLimiter())]`
     """
 
     def __init__(self, requests_per_minute: int | None = None):
         self.rpm = requests_per_minute
 
     async def __call__(self, request: Request) -> None:
-        """Bagimlilik calistiginda devreye girer."""
-        redis = redis_manager.get_client()
-        
-        # User auth middleware'inden (veya dependencysinden) tier ve admin durumu aliniyor
-        user_tier = getattr(request.state, "user_tier", UserTier.FREE.value)
+        # Adminler icin limit yok
         is_superuser = getattr(request.state, "is_superuser", False)
-        identifier = getattr(request.state, "user_id", None)
-        
-        # Adminler icin rate limit yok
         if is_superuser:
             return
-        
-        if not identifier:
-            # Login degilse IP kullan. Load Balancer destegi (X-Forwarded-For, X-Real-IP)
+
+        user_tier = getattr(request.state, "user_tier", UserTier.FREE.value)
+        user_id = getattr(request.state, "user_id", None)
+
+        # Identifier: giris yapildiysa user_id, yapilmadiysa gercek IP
+        if user_id:
+            identifier = f"user:{user_id}"
+        else:
             x_forwarded_for = request.headers.get("x-forwarded-for")
             if x_forwarded_for:
                 identifier = x_forwarded_for.split(",")[0].strip()
             else:
-                identifier = request.headers.get("x-real-ip", request.client.host if request.client else "unknown_ip")
-        
-        # Limit belirle (init ile override edilmisse o kullanilir, degilse tier limit)
-        limit = self.rpm if self.rpm is not None else TierLimits.get_rate_limit(user_tier)
-        
-        # Eger -1 ise sinirsiz
-        if limit == -1:
-            return
+                identifier = request.headers.get(
+                    "x-real-ip",
+                    request.client.host if request.client else "unknown_ip",
+                )
 
-        # Fixed window basit limitleme (1 dakikalik bucket)
-        current_minute = int(time.time() / 60)
-        key = f"rate_limit:{identifier}:{current_minute}"
+        # Limit: init'te override varsa o kullanilir, yoksa tier'dan gelir
+        limit = self.rpm if self.rpm is not None else TierLimits.get_rate_limit(user_tier)
+        if limit == -1:
+            return  # Sinirsiz
+
+        redis_key = f"rate_limit:sw:{identifier}"
+        now = time.time()
+        window_start = now - 60.0  # 60 saniyelik kayan pencere
 
         try:
-            current_count = await redis.incr(key)
-            if current_count == 1:
-                await redis.expire(key, 60)  # Anahtar 60 sn sonra dussun
-            
+            redis = redis_manager.get_client()
+
+            # Pipeline: eski kayitlari temizle → yeni kaydi ekle → say → TTL ayarla
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.zremrangebyscore(redis_key, "-inf", window_start)
+                pipe.zadd(redis_key, {str(now): now})
+                pipe.zcard(redis_key)
+                pipe.expire(redis_key, 60)
+                results = await pipe.execute()
+
+            current_count = results[2]  # zcard sonucu
+
             if current_count > limit:
                 raise HTTPException(
                     status_code=429,
-                    detail="Rate limit exceeded. Try again later."
+                    detail=f"Rate limit exceeded. Max {limit} requests per minute.",
+                    headers={"Retry-After": "60"},
                 )
         except HTTPException:
             raise
         except Exception:
-            # Redis arizasi durumunda limiti bypass et
+            # Redis arizi durumunda istege izin ver (fail-open)
             pass
