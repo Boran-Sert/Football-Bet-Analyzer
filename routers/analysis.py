@@ -1,109 +1,32 @@
-"""Analiz endpointleri.
+"""Analiz ve benzerlik API yonlendiricisi."""
 
-rules.md Madde 2: Router sadece HTTP istegini alir, Pydantic ile dogrular,
-Service katmanina paslar ve JSON doner.
-rules.md Madde 3: Service Depends() ile enjekte edilir.
-rules.md Madde 5: Rate limiter tum endpointlerde aktif.
-"""
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from typing import Optional
-
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-
-from core.database import mongo
-from middlewares.rate_limiter import rate_limit
-from repositories.match_repository import MatchRepository
-from schemas.match import MatchResponse, AnalysisResult
+from middleware.rate_limiter import RateLimiter
+from schemas.auth import UserInDB
 from services.analysis_service import AnalysisService
+from utils.dependencies import get_analysis_service, get_current_active_user
 
-router = APIRouter(
-    prefix="/api/v1",
-    tags=["analysis"],
-    dependencies=[Depends(rate_limit)],
-)
+router = APIRouter(prefix="/api/v1/football/analysis", tags=["Football Analysis"])
 
 
-# ═══════════════════════════════════════════════
-#  DEPENDENCY INJECTION FACTORY'LER
-# ═══════════════════════════════════════════════
-
-
-def get_analysis_service() -> AnalysisService:
-    """AnalysisService'i Depends() ile enjekte etmek icin factory.
-
-    rules.md Madde 3: Global singleton import etmek yasaktir.
+@router.get("/similar/{match_id}", dependencies=[Depends(RateLimiter())])
+async def get_similar_matches(
+    match_id: str,
+    limit: int | None = Query(None, ge=1, le=20, description="PRO/ELITE kullanicilar icin ozel limit belirleme"),
+    current_user: UserInDB = Depends(get_current_active_user),
+    service: AnalysisService = Depends(get_analysis_service)
+):
     """
-    repo = MatchRepository(mongo.db)
-    return AnalysisService(repo)
-
-
-# ═══════════════════════════════════════════════
-#  ENDPOINTLER
-# ═══════════════════════════════════════════════
-
-
-@router.get(
-    "/matches/{match_id}",
-    response_model=MatchResponse,
-    summary="Tek bir maci getir",
-)
-async def get_match(
-    match_id: str,
-    service: AnalysisService = Depends(get_analysis_service),
-):
-    """Belirtilen ID'ye sahip maci dondurur."""
-    match = await service.get_match_by_id(match_id)
-    if not match:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Mac bulunamadi.",
-        )
-    return match
-
-
-@router.get(
-    "/analysis/{match_id}",
-    response_model=AnalysisResult,
-    summary="Mac icin benzerlik analizi",
-)
-async def analyze_match(
-    match_id: str,
-    top_n: int = Query(default=5, ge=1, le=20, description="Benzer mac sayisi"),
-    service: AnalysisService = Depends(get_analysis_service),
-):
-    """Belirtilen mac icin gecmis verilerden benzerlik analizi yapar."""
-    result = await service.analyze_match(match_id, top_n=top_n)
-    if not result:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Mac bulunamadi veya yeterli gecmis veri yok.",
-        )
-    return result
-
-
-@router.get(
-    "/matches",
-    response_model=list[MatchResponse],
-    summary="Maclari listele",
-)
-async def list_matches(
-    league: Optional[str] = Query(default=None, description="Lig filtresi"),
-    season: Optional[str] = Query(default=None, description="Sezon filtresi (orn: 2024-2025)"),
-    status_filter: Optional[str] = Query(default=None, alias="status", description="Durum filtresi (finished/scheduled)"),
-    limit: int = Query(default=50, ge=1, le=200, description="Maksimum mac sayisi"),
-    service: AnalysisService = Depends(get_analysis_service),
-):
-    """Maclari filtrelerle listeler. Filtre verilmezse son 50 maci dondurur."""
-    query = {}
-    if league:
-        query["league"] = league
-    if season:
-        query["season"] = season
-    if status_filter:
-        query["status"] = status_filter
-
-    docs = await service.repo.find_many(
-        query, sort=[("match_date", -1)], limit=limit
+    Yaklasan bir macin oranlarina en benzeyen gecmis maclari bulur.
+    Kullanicinin tier'ina gore (FREE, PRO, ELITE) sonuclar sinirlandirilir.
+    """
+    results = await service.find_similar_matches(
+        target_match_id=match_id,
+        user_tier=current_user.tier,
+        is_superuser=current_user.is_superuser,
+        limit_override=limit
     )
-    return [AnalysisService._to_response(d) for d in docs]
-
+    
+    # Sonuclari dondur (Bos olabilir, Frontend bunu handle eder)
+    return results

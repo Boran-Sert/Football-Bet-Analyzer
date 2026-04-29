@@ -1,128 +1,124 @@
-"""Analiz is mantigi servisi.
+"""Benzerlik analizi (Oklid mesafesi) motoru."""
 
-rules.md Madde 2: Service katmani HTTP Request almaz, DB baglantisinı bilmez.
-Sadece Repository kullanarak veri okur ve is mantigi uygular.
-rules.md Madde 3: Router'dan Depends() ile enjekte edilir.
-"""
+import math
+from pydantic import BaseModel
 
-from typing import Optional
-
-from bson import ObjectId
-
+from core.config import TierLimits
 from repositories.match_repository import MatchRepository
-from schemas.match import MatchResponse, AnalysisResult
+from schemas.auth import UserTier
+from schemas.match import MatchInDB
+from utils.cache import cache_response
+
+
+class SimilarMatchResult(BaseModel):
+    """Benzer mac yanit objesi."""
+    match: MatchInDB
+    distance: float
+    similarity_percentage: float
 
 
 class AnalysisService:
-    """Mac analizi is mantigi. Repository uzerinden veri okur."""
+    """Yaklasan maclari gecmis verilerle karsilastirir."""
 
-    def __init__(self, repo: MatchRepository) -> None:
-        """Dependency Injection ile repository alir."""
-        self.repo = repo
+    def __init__(self, match_repo: MatchRepository):
+        self.repo = match_repo
 
-    async def get_match_by_id(self, match_id: str) -> Optional[MatchResponse]:
-        """Tek bir maci ID ile getirir."""
-        doc = await self.repo.find_one({"_id": ObjectId(match_id)})
-        if not doc:
-            return None
-        return self._to_response(doc)
-
-    async def analyze_match(self, match_id: str, top_n: int = 5) -> Optional[AnalysisResult]:
-        """Belirtilen mac icin benzerlik analizi yapar.
+    @cache_response(ttl_seconds=3600, prefix="analysis:similar")
+    async def find_similar_matches(
+        self,
+        target_match_id: str,
+        user_tier: UserTier,
+        is_superuser: bool = False,
+        limit_override: int | None = None
+    ) -> list[SimilarMatchResult]:
+        """Yaklasan bir macin oranlarina en benzeyen gecmis maclari bulur.
 
         Args:
-            match_id: Hedef macin MongoDB ID'si.
-            top_n: Dondurulecek benzer mac sayisi.
+            target_match_id: Hedef yaklasan macin ID'si.
+            user_tier: Kullanicinin katmani (FREE, PRO, ELITE).
+            limit_override: PRO kullanicilarin sectigi ozel limit.
 
-        Returns:
-            AnalysisResult veya None (mac bulunamazsa).
+        Kullanici yetkisine gore dondurulen sonuc sayisi (limit) belirlenir.
+        Sonuclar Redis'te onbelleklenir.
         """
-        target = await self.repo.find_one({"_id": ObjectId(match_id)})
-        if not target:
-            return None
-
-        # Ayni lig ve sezondaki tamamlanmis maclari getir
-        history = await self.repo.find_many(
-            {
-                "league": target["league"],
-                "status": "finished",
-                "odds_home": {"$exists": True, "$ne": None},
-            },
-            sort=[("match_date", -1)],
-            limit=200,
-        )
-
-        if not history:
-            return None
-
-        # Oklid mesafesi ile benzerlik hesapla
-        scored = self._calculate_similarity(target, history)
-        top_matches = sorted(scored, key=lambda x: x[1])[:top_n]
-        similar = [self._to_response(m) for m, _ in top_matches]
-
-        # Istatistik hesapla
-        stats = self._compute_stats([m for m, _ in top_matches])
-
-        return AnalysisResult(
-            target_match=self._to_response(target),
-            similar_matches=similar,
-            **stats,
-        )
-
-    def _calculate_similarity(self, target: dict, history: list[dict]) -> list[tuple]:
-        """Oklid mesafesi ile oran benzerligi hesaplar."""
-        odds_keys = ["odds_home", "odds_draw", "odds_away", "odds_over_25", "odds_under_25"]
-        target_vec = [target.get(k) for k in odds_keys]
-
-        if any(v is None for v in target_vec):
+        # Hedef maci bul
+        target = await self.repo.get_by_external_id(target_match_id)
+        if not target or target.status.value != "upcoming":
             return []
 
-        results = []
-        for match in history:
-            if str(match.get("_id")) == str(target.get("_id")):
+        # Hedef h2h oranlari yoksa analiz yapilamaz
+        if not target.odds or not getattr(target.odds, "h2h", None):
+            return []
+            
+        target_odds = target.odds.h2h
+        if target_odds.home is None or target_odds.draw is None or target_odds.away is None:
+            return []
+
+        # Tier'a gore limit belirle
+        tier_limit = TierLimits.get_similar_limit(user_tier.value)
+        
+        # ELITE veya Superuser limitleri
+        final_limit = tier_limit
+        if is_superuser:
+            final_limit = limit_override or 50 # Adminlere varsayilan 50
+        elif user_tier == UserTier.PRO and limit_override:
+            # Pro kullanici kendi limitini belirleyebilir (ama max limitinden fazla olamaz)
+            final_limit = min(limit_override, tier_limit)
+        elif user_tier == UserTier.ELITE and limit_override:
+            # Elite kullanici da kendi limitini belirleyebilir
+            final_limit = min(limit_override, tier_limit)
+
+        # Gecmis maclari cek
+        # Performans icin lig kilitli cekilebilir, ama daha iyi analiz icin genel cekiyoruz.
+        # RAM'de islem yapacagimiz icin son 2000 mac yeterli olacaktir.
+        historical_matches = await self.repo.get_completed_matches_for_analysis(limit=2000)
+
+        # Oklid hesaplamasi yap
+        results: list[SimilarMatchResult] = []
+        for match in historical_matches:
+            if not getattr(match, "odds", None) or not getattr(match.odds, "h2h", None):
                 continue
-            match_vec = [match.get(k) for k in odds_keys]
-            if any(v is None for v in match_vec):
+                
+            hist_odds = match.odds.h2h
+            if hist_odds.home is None or hist_odds.draw is None or hist_odds.away is None:
                 continue
 
-            distance = sum((a - b) ** 2 for a, b in zip(target_vec, match_vec)) ** 0.5
-            results.append((match, distance))
+            # sqrt((x2 - x1)^2 + (y2 - y1)^2 + (z2 - z1)^2)
+            distance = math.sqrt(
+                (target_odds.home - hist_odds.home) ** 2 +
+                (target_odds.draw - hist_odds.draw) ** 2 +
+                (target_odds.away - hist_odds.away) ** 2
+            )
 
-        return results
+            # Sadece makul derecede benzer olanlari al (esnetildi: 3.0)
+            if distance < 3.0:
+                # distance: 0 tamamen ayni, buyudukce benzemez
+                # Yuzdelik benzerlik skoruna cevirme (orneksel)
+                sim_pct = max(0.0, 100.0 - (distance * 33.3))
+                
+                results.append(SimilarMatchResult(
+                    match=match,
+                    distance=round(distance, 4),
+                    similarity_percentage=round(sim_pct, 1)
+                ))
 
-    def _compute_stats(self, matches: list[dict]) -> dict:
-        """Benzer maclardan istatistik ozeti cikarir."""
-        total = len(matches)
-        if total == 0:
-            return {"home_win_pct": 0, "draw_pct": 0, "away_win_pct": 0, "avg_total_goals": 0}
+        # Mesafeye gore artan sirala (en yakin once)
+        results.sort(key=lambda x: x.distance)
 
-        home_wins = sum(1 for m in matches if (m.get("home_goals") or 0) > (m.get("away_goals") or 0))
-        draws = sum(1 for m in matches if (m.get("home_goals") or 0) == (m.get("away_goals") or 0))
-        away_wins = total - home_wins - draws
-        avg_goals = sum((m.get("home_goals") or 0) + (m.get("away_goals") or 0) for m in matches) / total
+        # Mukerrerleri engelle (Ayni gun, ayni takimlar)
+        seen_matches = set()
+        unique_results = []
+        for res in results:
+            match_key = (
+                res.match.commence_time.date(),
+                res.match.home_team,
+                res.match.away_team
+            )
+            if match_key not in seen_matches:
+                seen_matches.add(match_key)
+                unique_results.append(res)
+            
+            if len(unique_results) >= final_limit:
+                break
 
-        return {
-            "home_win_pct": round(home_wins / total * 100, 1),
-            "draw_pct": round(draws / total * 100, 1),
-            "away_win_pct": round(away_wins / total * 100, 1),
-            "avg_total_goals": round(avg_goals, 2),
-        }
-
-    @staticmethod
-    def _to_response(doc: dict) -> MatchResponse:
-        """MongoDB belgesini MatchResponse semasina donusturur."""
-        return MatchResponse(
-            id=str(doc["_id"]),
-            home_team=doc["home_team"],
-            away_team=doc["away_team"],
-            league=doc["league"],
-            match_date=doc["match_date"],
-            home_goals=doc.get("home_goals"),
-            away_goals=doc.get("away_goals"),
-            odds_home=doc.get("odds_home"),
-            odds_draw=doc.get("odds_draw"),
-            odds_away=doc.get("odds_away"),
-            odds_over_25=doc.get("odds_over_25"),
-            odds_under_25=doc.get("odds_under_25"),
-            status=doc.get("status", "scheduled"),
-        )
+        return unique_results

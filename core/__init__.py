@@ -1,1 +1,1 @@
-"""core paket baslangic dosyasi."""
+# core package

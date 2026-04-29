@@ -1,166 +1,118 @@
-"""Kullanici kimlik dogrulama servisi (async).
+"""Kimlik dogrulama is mantigi ve JWT islemleri."""
 
-passlib ile sifre hashleme, python-jose ile JWT token yonetimi.
-rules.md Madde 2: Service katmani DB baglantisinı bilmez, Repository kullanir.
-rules.md Madde 3: Depends() ile enjekte edilir.
-"""
+from datetime import datetime, timedelta
 
-import datetime
-import logging
+from passlib.context import CryptContext
+from jose import JWTError, jwt
 
-from typing import Any, Dict, Optional
-
-from motor.motor_asyncio import AsyncIOMotorDatabase
-
-from repositories.base import BaseRepository
-from utils.security import (
-    hash_password,
-    verify_password,
-    create_access_token,
-    create_reset_token,
-    decode_token,
-)
 from core.config import settings
+from repositories.user_repository import UserRepository
+from schemas.auth import TokenData, UserCreate, UserInDB, UserTier
 
-logger = logging.getLogger(__name__)
-
-
-class UserRepository(BaseRepository):
-    """users koleksiyonuna ozel repository."""
-
-    def __init__(self, db: AsyncIOMotorDatabase) -> None:
-        super().__init__(db, "users")
-
-    async def find_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        """E-posta adresine gore kullanici bulur."""
-        return await self.find_one({"email": email})
-
-    async def find_by_username(self, username: str) -> Optional[Dict[str, Any]]:
-        """Kullanici adina gore kullanici bulur."""
-        return await self.find_one({"username": username})
-
-    async def update_password(self, username: str, new_hashed_pw: str) -> int:
-        """Kullanicinin sifresini gunceller."""
-        return await self.update_one(
-            {"username": username},
-            {"password": new_hashed_pw},
-        )
+# Şifre hashleme yapilandirmasi (bcrypt)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class AuthService:
-    """Kullanici kayit, giris ve sifre sifirlama islemlerini yoneten servis."""
+    """Kimlik dogrulama ve JWT yonetimi."""
 
-    def __init__(self, repo: UserRepository) -> None:
-        """Dependency Injection ile repository alir."""
+    def __init__(self, repo: UserRepository):
         self.repo = repo
 
-    async def register(
-        self, username: str, email: str, password: str, role: str = "user"
-    ) -> Optional[Dict[str, Any]]:
-        """Yeni kullanici kaydeder.
+    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        """Sifre dogrulamasi yapar."""
+        return pwd_context.verify(plain_password, hashed_password)
 
-        Kullanici adi veya e-posta zaten alinmissa None doner.
-        """
-        if await self.repo.find_by_username(username):
-            return None
-        if await self.repo.find_by_email(email):
-            return None
+    def get_password_hash(self, password: str) -> str:
+        """Sifreyi hashler."""
+        return pwd_context.hash(password)
 
-        user_data = {
-            "username": username,
-            "email": email,
-            "password": hash_password(password),
-            "role": role,
-            "created_at": datetime.datetime.now(datetime.timezone.utc),
+    def create_access_token(self, user_id: str, tier: UserTier, is_superuser: bool = False) -> str:
+        """Kullanici icin yeni bir JWT (Access Token) uretir."""
+        expire = datetime.utcnow() + timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES)
+        
+        to_encode = {
+            "sub": user_id,
+            "tier": tier.value,
+            "is_superuser": is_superuser,
+            "exp": expire
         }
-        inserted_id = await self.repo.insert_one(user_data)
-        user_data["_id"] = inserted_id
-        user_data.pop("password")
-        return user_data
-
-    async def login(self, username: str, password: str) -> Optional[Dict[str, str]]:
-        """Giris bilgilerini dogrular. Basariliysa JWT token doner."""
-        user = await self.repo.find_by_username(username)
-        if not user:
-            return None
-
-        if not verify_password(password, user["password"]):
-            return None
-
-        token = create_access_token(
-            data={"sub": user["username"], "role": user.get("role", "user")}
+        
+        encoded_jwt = jwt.encode(
+            to_encode,
+            settings.JWT_SECRET_KEY,
+            algorithm=settings.JWT_ALGORITHM
         )
-        return {
-            "access_token": token,
-            "token_type": "bearer",
-            "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        }
+        return encoded_jwt
 
-    async def forgot_password(self, email: str) -> bool:
-        """Sifre sifirlama token'i olusturur ve e-posta ile gonderir.
+    def create_verification_token(self, email: str) -> str:
+        """E-posta dogrulama icin ozel bir JWT uretir (24 saat gecerli)."""
+        expire = datetime.utcnow() + timedelta(hours=24)
+        to_encode = {"sub": email, "type": "email_verify", "exp": expire}
+        return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
-        Kullanici bulunamazsa False doner.
-        """
-        user = await self.repo.find_by_email(email)
-        if not user:
-            return False
-
-        token = create_reset_token(user["username"])
-
-        # E-posta gonder
-        from utils.email import send_reset_email
-
-        sent = await send_reset_email(
-            to_email=email,
-            username=user["username"],
-            reset_token=token,
-        )
-
-        if not sent:
-            logger.warning(
-                "E-posta gonderilemedi (kullanici: %s). Token loglandi.",
-                user["username"],
+    def decode_token(self, token: str) -> TokenData | None:
+        """JWT'yi cozer ve TokenData'yi dondurur. Gecersizse None doner."""
+        try:
+            payload = jwt.decode(
+                token,
+                settings.JWT_SECRET_KEY,
+                algorithms=[settings.JWT_ALGORITHM]
             )
-            # E-posta servisi calismazsa token'i loglayarak erisime ac
-            logger.info("Reset token (fallback): %s", token)
-
-        return True
-
-    async def reset_password(self, token: str, new_password: str) -> bool:
-        """Sifre sifirlama token'ini dogrulayip yeni sifreyi kaydeder."""
-        payload = decode_token(token)
-        if not payload:
-            return False
-
-        if payload.get("purpose") != "reset":
-            return False
-
-        username = payload.get("sub")
-        if not username:
-            return False
-
-        user = await self.repo.find_by_username(username)
-        if not user:
-            return False
-
-        new_hash = hash_password(new_password)
-        updated = await self.repo.update_password(username, new_hash)
-        return updated > 0
-
-    async def get_current_user(self, token: str) -> Optional[Dict[str, Any]]:
-        """JWT token'dan aktif kullaniciyi dondurur."""
-        payload = decode_token(token)
-        if not payload:
+            user_id: str = payload.get("sub")
+            tier_str: str = payload.get("tier")
+            is_superuser: bool = payload.get("is_superuser", False)
+            
+            if user_id is None or tier_str is None:
+                return None
+                
+            return TokenData(
+                user_id=user_id,
+                tier=UserTier(tier_str),
+                is_superuser=is_superuser,
+                exp=datetime.utcfromtimestamp(payload.get("exp")) if payload.get("exp") else None
+            )
+        except JWTError:
             return None
 
-        username = payload.get("sub")
-        if not username:
+    async def register_user(self, user_in: UserCreate) -> UserInDB | None:
+        """Yeni kullanici kaydi olusturur. Email kullanimdaysa None doner."""
+        existing = await self.repo.get_by_email(user_in.email)
+        if existing:
             return None
 
-        user = await self.repo.find_by_username(username)
-        if not user:
-            return None
+        hashed_password = self.get_password_hash(user_in.password)
+        new_user = UserInDB(
+            email=user_in.email,
+            display_name=user_in.display_name,
+            hashed_password=hashed_password,
+            tier=UserTier.FREE,  # Varsayilan olarak FREE
+            is_verified=False,    # Varsayilan olarak dogrulanmamis
+            is_superuser=False    # Varsayilan olarak admin degil
+        )
+        
+        return await self.repo.create(new_user)
 
-        user.pop("password", None)
-        user["_id"] = str(user["_id"])
-        return user
+    async def verify_user_email(self, token: str) -> bool:
+        """Dogrulama token'ini cozer ve veritabaninda kullaniciyi dogrular."""
+        try:
+            payload = jwt.decode(
+                token,
+                settings.JWT_SECRET_KEY,
+                algorithms=[settings.JWT_ALGORITHM]
+            )
+            email: str = payload.get("sub")
+            token_type: str = payload.get("type")
+            
+            if not email or token_type != "email_verify":
+                return False
+                
+            user = await self.repo.get_by_email(email)
+            if not user:
+                return False
+                
+            # Kullaniciyi dogrulanmis isaretle
+            return await self.repo.verify_user(user.id)
+            
+        except JWTError:
+            return False

@@ -1,1 +1,1 @@
-"""services paket baslangic dosyasi."""
+# services package

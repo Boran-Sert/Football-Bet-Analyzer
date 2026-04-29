@@ -1,1 +1,1 @@
-"""tasks paket baslangic dosyasi."""
+# tasks package

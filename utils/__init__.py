@@ -1,1 +1,1 @@
-"""utils paket baslangic dosyasi."""
+# utils package

@@ -1,1 +1,1 @@
-"""schemas paket baslangic dosyasi."""
+# schemas package

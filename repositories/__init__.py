@@ -1,1 +1,1 @@
-"""repositories paket baslangic dosyasi."""
+# repositories package

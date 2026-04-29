@@ -1,72 +1,71 @@
-"""Kimlik dogrulama (Auth) icin Pydantic v2 sema tanimlari.
-
-Istek (Request) ve yanit (Response) semalari ayri tutulur.
-"""
+"""Kimlik dogrulama veri transfer objeleri."""
 
 from datetime import datetime
-from typing import Optional
+from enum import Enum
 
-from pydantic import BaseModel, Field, EmailStr
-
-
-# ═══════════════════════════════════════════════
-#  ISTEK SEMALARI (Frontend → Backend)
-# ═══════════════════════════════════════════════
+from pydantic import BaseModel, EmailStr, Field
 
 
-class RegisterRequest(BaseModel):
-    """Kullanici kayit istegi."""
+class UserTier(str, Enum):
+    """Kullanici katmani. Tier limitleri core/config.py TierLimits'te."""
+    FREE = "free"
+    PRO = "pro"
+    ELITE = "elite"
 
-    username: str = Field(min_length=3, max_length=30, description="Kullanici adi")
-    email: EmailStr = Field(description="E-posta adresi")
-    password: str = Field(min_length=6, max_length=128, description="Sifre")
+
+class UserCreate(BaseModel):
+    """Kayit istegi."""
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
+    display_name: str = Field(..., min_length=2, max_length=50)
 
 
-class LoginRequest(BaseModel):
-    """Kullanici giris istegi."""
-
-    username: str
+class UserLogin(BaseModel):
+    """Giris istegi."""
+    email: EmailStr
     password: str
 
 
-class ForgotPasswordRequest(BaseModel):
-    """Sifre sifirlama talebi."""
+class UserInDB(BaseModel):
+    """MongoDB'deki kullanici dokumani."""
+    id: str = Field(default="", alias="_id")
+    email: str
+    display_name: str
+    hashed_password: str
+    tier: UserTier = UserTier.FREE
+    is_verified: bool = False
+    is_superuser: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
-    email: EmailStr = Field(description="Kayitli e-posta adresi")
-
-
-class ResetPasswordRequest(BaseModel):
-    """Sifre sifirlama islemi."""
-
-    token: str = Field(description="Sifirlama token'i")
-    new_password: str = Field(min_length=6, max_length=128, description="Yeni sifre")
-
-
-# ═══════════════════════════════════════════════
-#  YANIT SEMALARI (Backend → Frontend)
-# ═══════════════════════════════════════════════
-
-
-class TokenResponse(BaseModel):
-    """Basarili giris sonrasi donen JWT token."""
-
-    access_token: str
-    token_type: str = "bearer"
-    expires_in: int = Field(description="Token gecerlilik suresi (saniye)")
+    model_config = {"from_attributes": True, "populate_by_name": True}
 
 
 class UserResponse(BaseModel):
-    """Kullanici profil bilgisi."""
-
+    """API yaniti — sifre haric."""
     id: str
-    username: str
     email: str
-    role: str
+    display_name: str
+    tier: UserTier
+    is_verified: bool
+    is_superuser: bool
     created_at: datetime
 
 
-class MessageResponse(BaseModel):
-    """Genel basari/bilgi mesaji."""
+class TokenData(BaseModel):
+    """JWT payload."""
+    user_id: str
+    tier: UserTier
+    is_superuser: bool = False
+    exp: datetime | None = None
 
-    message: str
-    detail: Optional[str] = None
+
+class TokenResponse(BaseModel):
+    """Login/Register yaniti."""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class EmailVerifyRequest(BaseModel):
+    """Email dogrulama token'i."""
+    token: str

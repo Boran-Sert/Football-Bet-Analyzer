@@ -1,169 +1,82 @@
-"""Kimlik dogrulama endpointleri.
+"""Kimlik dogrulama API yonlendiricisi."""
 
-rules.md Madde 2: Router sadece HTTP istegini alir, Service'e paslar, JSON doner.
-rules.md Madde 3: AuthService Depends() ile enjekte edilir.
-rules.md Madde 5: Rate limiter tum endpointlerde aktif.
-rules.md Madde 5: Ham hatalar kullaniciya dondurulmez, temiz HTTP yanit verilir.
-"""
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi.security import OAuth2PasswordRequestForm
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from clients.email_client import email_client
+from core.config import settings
 
-from core.database import mongo
-from middlewares.rate_limiter import rate_limit
-from schemas.auth import (
-    RegisterRequest,
-    LoginRequest,
-    ForgotPasswordRequest,
-    ResetPasswordRequest,
-    TokenResponse,
-    UserResponse,
-    MessageResponse,
-)
-from services.auth_service import AuthService, UserRepository
+from schemas.auth import TokenResponse, UserCreate, UserInDB, UserResponse
+from services.auth_service import AuthService
+from utils.dependencies import get_auth_service, get_current_user
 
-router = APIRouter(
-    prefix="/api/v1/auth",
-    tags=["auth"],
-    dependencies=[Depends(rate_limit)],
-)
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
 
 
-# ═══════════════════════════════════════════════
-#  DEPENDENCY INJECTION FACTORY'LER
-# ═══════════════════════════════════════════════
-
-
-def get_auth_service() -> AuthService:
-    """AuthService'i Depends() ile enjekte etmek icin factory."""
-    repo = UserRepository(mongo.db)
-    return AuthService(repo)
-
-
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    service: AuthService = Depends(get_auth_service),
-) -> dict:
-    """JWT token'dan aktif kullaniciyi cozumler.
-
-    Korunmus endpointlerde Depends(get_current_user) ile kullanilir.
-    """
-    user = await service.get_current_user(token)
+@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+async def register(
+    user_in: UserCreate,
+    background_tasks: BackgroundTasks,
+    auth_service: AuthService = Depends(get_auth_service)
+):
+    """Yeni kullanici kaydi olusturur ve dogrulama e-postasi gonderir."""
+    user = await auth_service.register_user(user_in)
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Gecersiz veya suresi dolmus token.",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bu email adresi ile kayitli bir kullanici zaten var."
         )
+    
+    # Dogrulama token'i uret ve e-posta gonderimini arka plana ekle
+    token = auth_service.create_verification_token(user.email)
+    verify_url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+    background_tasks.add_task(email_client.send_verification_email, user.email, verify_url)
+    
     return user
 
 
-# ═══════════════════════════════════════════════
-#  ENDPOINTLER
-# ═══════════════════════════════════════════════
-
-
-@router.post(
-    "/register",
-    response_model=MessageResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Yeni kullanici kaydi",
-)
-async def register(
-    body: RegisterRequest,
-    service: AuthService = Depends(get_auth_service),
-):
-    """Yeni bir kullanici hesabi olusturur."""
-    user = await service.register(
-        username=body.username,
-        email=body.email,
-        password=body.password,
-    )
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Bu kullanici adi veya e-posta adresi zaten kullaniliyor.",
-        )
-    return MessageResponse(
-        message="Kayit basarili.",
-        detail=f"Hosgeldiniz, {body.username}!",
-    )
-
-
-@router.post(
-    "/login",
-    response_model=TokenResponse,
-    summary="Kullanici girisi",
-)
+@router.post("/login", response_model=TokenResponse)
 async def login(
-    body: LoginRequest,
-    service: AuthService = Depends(get_auth_service),
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    auth_service: AuthService = Depends(get_auth_service)
 ):
-    """Kullanici adi ve sifre ile giris yapar. JWT token doner."""
-    result = await service.login(body.username, body.password)
-    if not result:
+    """Email ve sifre ile giris yapar, JWT dondurur."""
+    user = await auth_service.repo.get_by_email(form_data.username)
+    if not user or not auth_service.verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Kullanici adi veya sifre hatali.",
+            detail="Hatali e-posta veya sifre",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    return TokenResponse(**result)
-
-
-@router.post(
-    "/forgot-password",
-    response_model=MessageResponse,
-    summary="Sifre sifirlama talebi",
-)
-async def forgot_password(
-    body: ForgotPasswordRequest,
-    service: AuthService = Depends(get_auth_service),
-):
-    """Kayitli e-posta adresine sifre sifirlama baglantisi gonderir.
-
-    Guvenlik: Kullanici bulunamasa bile ayni mesaj doner
-    (e-posta enumeration saldirisini onler).
-    """
-    await service.forgot_password(body.email)
-
-    # Her durumda ayni yanit (kullanici var/yok farketmez)
-    return MessageResponse(
-        message="Eger bu e-posta adresi sistemimizde kayitliysa, "
-        "sifre sifirlama baglantisi gonderilmistir.",
+        
+    access_token = auth_service.create_access_token(
+        user_id=user.id, 
+        tier=user.tier, 
+        is_superuser=user.is_superuser
     )
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": "not-implemented-yet",
+        "token_type": "bearer"
+    }
 
 
-@router.post(
-    "/reset-password",
-    response_model=MessageResponse,
-    summary="Sifre sifirlama",
-)
-async def reset_password(
-    body: ResetPasswordRequest,
-    service: AuthService = Depends(get_auth_service),
+@router.get("/me", response_model=UserResponse)
+async def get_me(current_user: UserInDB = Depends(get_current_user)):
+    """Mevcut giris yapmis kullanicinin bilgilerini dondurur."""
+    return current_user
+
+@router.get("/verify-email")
+async def verify_email(
+    token: str,
+    auth_service: AuthService = Depends(get_auth_service)
 ):
-    """Sifre sifirlama token'i ile yeni sifre belirler."""
-    success = await service.reset_password(body.token, body.new_password)
-    if not success:
+    """E-posta dogrulama linkini isler."""
+    is_valid = await auth_service.verify_user_email(token)
+    if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Gecersiz veya suresi dolmus sifirlama token'i.",
+            detail="Gecersiz veya suresi dolmus dogrulama token'i."
         )
-    return MessageResponse(message="Sifreniz basariyla guncellendi.")
-
-
-@router.get(
-    "/me",
-    response_model=UserResponse,
-    summary="Aktif kullanici profili",
-)
-async def get_me(current_user: dict = Depends(get_current_user)):
-    """JWT token sahibi kullanicinin profil bilgilerini doner."""
-    return UserResponse(
-        id=current_user["_id"],
-        username=current_user["username"],
-        email=current_user["email"],
-        role=current_user["role"],
-        created_at=current_user["created_at"],
-    )
+    return {"message": "E-posta adresiniz basariyla dogrulandi."}
