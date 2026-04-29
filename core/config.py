@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     STRIPE_PRICE_PRO: str = ""    # e.g. price_1ABC...
     STRIPE_PRICE_ELITE: str = ""  # e.g. price_1XYZ...
 
+    # ── Iyzico (GAP 7) ──────────────────────────────────────────────────────
+    IYZICO_API_KEY: str = ""
+    IYZICO_SECRET_KEY: str = ""
+    IYZICO_BASE_URL: str = "https://sandbox-api.iyzipay.com"  # default sandbox
+
     # ── Scheduler ──
     SCHEDULER_SLOTS: list[dict] = [
         {"hour": 14, "minute": 0},

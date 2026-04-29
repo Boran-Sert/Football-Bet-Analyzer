@@ -11,7 +11,6 @@ Yeni yaklasim:
 """
 
 import logging
-import math
 from pydantic import BaseModel
 
 from core.config import TierLimits
@@ -58,7 +57,11 @@ class AnalysisService:
             return []
 
         target_odds = target.odds.h2h
-        if target_odds.home is None or target_odds.draw is None or target_odds.away is None:
+        if (
+            target_odds.home is None
+            or target_odds.draw is None
+            or target_odds.away is None
+        ):
             return []
 
         # Tier limit
@@ -108,23 +111,27 @@ class AnalysisService:
             # 1. Sadece tamamlanmis maclar
             {"$match": {"status": "completed"}},
             # 2. h2h odds mevcut olanlar
-            {"$match": {
-                "odds.h2h.home": {"$exists": True, "$ne": None},
-                "odds.h2h.draw": {"$exists": True, "$ne": None},
-                "odds.h2h.away": {"$exists": True, "$ne": None},
-            }},
+            {
+                "$match": {
+                    "odds.h2h.home": {"$exists": True, "$ne": None},
+                    "odds.h2h.draw": {"$exists": True, "$ne": None},
+                    "odds.h2h.away": {"$exists": True, "$ne": None},
+                }
+            },
             # 3. Euclidean mesafeyi hesapla
-            {"$addFields": {
-                "distance": {
-                    "$sqrt": {
-                        "$add": [
-                            {"$pow": [{"$subtract": ["$odds.h2h.home", home]}, 2]},
-                            {"$pow": [{"$subtract": ["$odds.h2h.draw", draw]}, 2]},
-                            {"$pow": [{"$subtract": ["$odds.h2h.away", away]}, 2]},
-                        ]
+            {
+                "$addFields": {
+                    "distance": {
+                        "$sqrt": {
+                            "$add": [
+                                {"$pow": [{"$subtract": ["$odds.h2h.home", home]}, 2]},
+                                {"$pow": [{"$subtract": ["$odds.h2h.draw", draw]}, 2]},
+                                {"$pow": [{"$subtract": ["$odds.h2h.away", away]}, 2]},
+                            ]
+                        }
                     }
                 }
-            }},
+            },
             # 4. Sadece DISTANCE_THRESHOLD altindakileri al
             {"$match": {"distance": {"$lt": DISTANCE_THRESHOLD}}},
             # 5. En yakin once sirala
@@ -144,7 +151,9 @@ class AnalysisService:
                 sim_pct = max(0.0, 100.0 - (distance * 33.3))
                 results.append(
                     SimilarMatchResult(
-                        match=MatchInDB(**{k: v for k, v in doc.items() if k != "distance"}),
+                        match=MatchInDB(
+                            **{k: v for k, v in doc.items() if k != "distance"}
+                        ),
                         distance=round(distance, 4),
                         similarity_percentage=round(sim_pct, 1),
                     )
