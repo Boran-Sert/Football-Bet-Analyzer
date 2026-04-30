@@ -30,22 +30,22 @@ export default function SummaryStats({ results }: SummaryStatsProps) {
   const avgGoals = (totalGoalsSum / totalMatches).toFixed(1);
 
   return (
-    <div className="w-full mt-6 flex flex-col md:flex-row justify-between items-start md:items-center px-4">
+    <div className="w-full flex flex-col md:flex-row justify-between items-start md:items-center">
       <div className="flex flex-col mb-4 md:mb-0">
         <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Ev Sahibi Galibiyeti</span>
-        <span className="text-3xl font-black text-slate-100">{homeWins}/{totalMatches}</span>
+        <span className="text-3xl font-black text-white">{homeWins}/{totalMatches}</span>
       </div>
       <div className="flex flex-col mb-4 md:mb-0">
         <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Beraberlik</span>
-        <span className="text-3xl font-black text-slate-100">{draws}/{totalMatches}</span>
+        <span className="text-3xl font-black text-white">{draws}/{totalMatches}</span>
       </div>
       <div className="flex flex-col mb-4 md:mb-0">
         <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Deplasman Galibiyeti</span>
-        <span className="text-3xl font-black text-slate-100">{awayWins}/{totalMatches}</span>
+        <span className="text-3xl font-black text-white">{awayWins}/{totalMatches}</span>
       </div>
       <div className="flex flex-col mb-4 md:mb-0">
         <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Ort. Toplam Gol</span>
-        <span className="text-3xl font-black text-slate-100">{avgGoals}</span>
+        <span className="text-3xl font-black text-primary">{avgGoals}</span>
       </div>
     </div>
   );

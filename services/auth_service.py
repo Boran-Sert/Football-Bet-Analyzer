@@ -28,6 +28,14 @@ class AuthService:
     def get_password_hash(self, password: str) -> str:
         return pwd_context.hash(password)
 
+    async def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
+        user = await self.repo.get_by_id(user_id)
+        if not user or not self.verify_password(current_password, user.hashed_password):
+            return False
+        
+        new_hash = self.get_password_hash(new_password)
+        return await self.repo.update_password(user_id, new_hash)
+
     # ── Access token ──────────────────────────────────────────────────────────
 
     def create_access_token(self, user_id: str, tier: UserTier, is_superuser: bool = False) -> str:
@@ -182,7 +190,7 @@ class AuthService:
             email=user_in.email,
             display_name=user_in.display_name,
             hashed_password=hashed_password,
-            tier=UserTier.FREE,
+            tier=UserTier.STANDARD,
             is_verified=False,
             is_superuser=False,
         )

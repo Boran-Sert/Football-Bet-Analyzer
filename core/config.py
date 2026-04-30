@@ -7,14 +7,14 @@ from typing import ClassVar
 
 class TierLimits:
     similar_matches: ClassVar[dict[str, int]] = {
-        "free": 3,
+        "standard": 3,
         "pro": 10,
         "elite": 20,
     }
 
     rate_limit_per_minute: ClassVar[dict[str, int]] = {
-        "free": 60,
-        "pro": 200,
+        "standard": 60,
+        "pro": 300,
         "elite": 1000,
     }
 
@@ -23,11 +23,11 @@ class TierLimits:
 
     @classmethod
     def get_similar_limit(cls, tier: str) -> int:
-        return cls.similar_matches.get(tier, cls.similar_matches["free"])
+        return cls.similar_matches.get(tier, cls.similar_matches["standard"])
 
     @classmethod
     def get_rate_limit(cls, tier: str) -> int:
-        return cls.rate_limit_per_minute.get(tier, cls.rate_limit_per_minute["free"])
+        return cls.rate_limit_per_minute.get(tier, cls.rate_limit_per_minute["standard"])
 
 
 class Settings(BaseSettings):

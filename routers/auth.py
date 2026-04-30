@@ -17,6 +17,7 @@ from clients.email_client import email_client
 from core.config import settings
 from schemas.auth import (
     EmailVerifyRequest,
+    PasswordChangeRequest,
     PasswordResetConfirm,
     PasswordResetRequest,
     RefreshRequest,
@@ -155,6 +156,21 @@ async def reset_password(
     if not success:
         raise HTTPException(status_code=400, detail="Gecersiz veya suresi dolmus sifre sifirlama token'i.")
     return {"message": "Sifreniz basariyla guncellendi. Lutfen yeniden giris yapin."}
+
+
+@router.post("/change-password", status_code=200)
+async def change_password(
+    body: PasswordChangeRequest,
+    current_user: UserInDB = Depends(get_current_active_user),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """Mevcut sifreyi dogrulayarak yeni sifre belirler."""
+    success = await auth_service.change_password(
+        current_user.id, body.current_password, body.new_password
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail="Mevcut sifre hatali.")
+    return {"message": "Sifreniz basariyla degistirildi."}
 
 
 # ── Me ────────────────────────────────────────────────────────────────────────

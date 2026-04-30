@@ -19,7 +19,7 @@ async def get_similar_matches(
 ):
     """
     Yaklasan bir macin oranlarina en benzeyen gecmis maclari bulur.
-    Kullanicinin tier'ina gore (FREE, PRO, ELITE) sonuclar sinirlandirilir.
+    Kullanicinin tier'ina gore (STANDARD, PRO, ELITE) sonuclar sinirlandirilir.
     """
     results = await service.find_similar_matches(
         target_match_id=match_id,

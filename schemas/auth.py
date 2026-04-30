@@ -7,7 +7,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 
 class UserTier(str, Enum):
-    FREE = "free"
+    STANDARD = "standard"
     PRO = "pro"
     ELITE = "elite"
 
@@ -28,7 +28,7 @@ class UserInDB(BaseModel):
     email: str
     display_name: str
     hashed_password: str
-    tier: UserTier = UserTier.FREE
+    tier: UserTier = UserTier.STANDARD
     is_verified: bool = False
     is_superuser: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -81,3 +81,11 @@ class PasswordResetConfirm(BaseModel):
 class RefreshRequest(BaseModel):
     """Token yenileme veya logout isteği."""
     refresh_token: str
+
+
+# ── Password Change ───────────────────────────────────────────────────────────
+
+class PasswordChangeRequest(BaseModel):
+    """Sifre degistirme isteği."""
+    current_password: str
+    new_password: str = Field(..., min_length=8, max_length=128)

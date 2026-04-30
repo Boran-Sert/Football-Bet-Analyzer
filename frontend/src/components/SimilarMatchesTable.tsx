@@ -17,38 +17,31 @@ export default function SimilarMatchesTable({ results }: SimilarMatchesTableProp
   };
 
   return (
-    <div className="w-full mt-4">
-      <div className="w-full bg-[#166534] px-4 py-2 text-xs font-bold text-green-100 rounded-t-lg border-b-0 border border-slate-700">
-        En yakın {results.length} benzer iş eşleşmesi (Detaylar için maça tıklayın)
+    <div className="w-full">
+      <div className="w-full bg-white/[0.03] px-6 py-4 border-b border-white/5 flex items-center justify-between">
+        <h3 className="text-xs font-black text-white uppercase tracking-widest">En Yakın {results.length} Eşleşme</h3>
+        <span className="text-[10px] font-bold text-slate-500 uppercase">Detaylar için tıkla</span>
       </div>
-      <div className="w-full overflow-x-auto border border-slate-800 bg-[#0a0f18] rounded-b-lg">
+      <div className="w-full overflow-x-auto">
         <table className="w-full text-left text-[10px] md:text-xs whitespace-nowrap">
-          <thead className="bg-[#111827] text-slate-400 border-b border-slate-800">
+          <thead className="bg-white/[0.02] text-slate-500 border-b border-white/5">
             <tr>
-              <th className="px-3 py-2 font-medium">Tarih</th>
-              <th className="px-3 py-2 font-medium">Ev Sahibi</th>
-              <th className="px-3 py-2 font-medium">Deplasman</th>
-              <th className="px-3 py-2 font-medium text-center">Ev Sahibi Gol</th>
-              <th className="px-3 py-2 font-medium text-center">Deplasman Gol</th>
-              <th className="px-3 py-2 font-medium text-center">İY Ev</th>
-              <th className="px-3 py-2 font-medium text-center">İY Dep</th>
-              <th className="px-3 py-2 font-medium text-center">Ev Sahibi Sarı Kart</th>
-              <th className="px-3 py-2 font-medium text-center">Deplasman Sarı Kart</th>
-              <th className="px-3 py-2 font-medium text-center">Ev Sahibi Kırmızı Kart</th>
-              <th className="px-3 py-2 font-medium text-center">Deplasman Kırmızı Kart</th>
-              <th className="px-3 py-2 font-medium text-center">Ev Sahibi Korner</th>
-              <th className="px-3 py-2 font-medium text-center">Deplasman Korner</th>
-              <th className="px-3 py-2 font-medium text-right">MS 1</th>
-              <th className="px-3 py-2 font-medium text-right">MS 0</th>
-              <th className="px-3 py-2 font-medium text-right">MS 2</th>
-              <th className="px-3 py-2 font-medium text-right">2.5 Alt</th>
-              <th className="px-3 py-2 font-medium text-right">2.5 Üst</th>
-              <th className="px-3 py-2 font-medium text-center">Toplam Korner</th>
-              <th className="px-3 py-2 font-medium text-center">Toplam Sarı Kart</th>
-              <th className="px-3 py-2 font-medium text-center">Toplam Kırmızı Kart</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest">Tarih</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest">Ev Sahibi</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest">Deplasman</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-center">G</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-center">İY</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-center">Sarı</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-center">Kırmızı</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-center">Korner</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-right">MS 1</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-right">MS 0</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-right">MS 2</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-right">2.5 A/Ü</th>
+              <th className="px-4 py-3 font-black uppercase tracking-widest text-right">Benzerlik</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-800/50">
+          <tbody className="divide-y divide-white/5">
             {results.map((item) => {
               const match = item.match;
               const h2h = match.odds.h2h;
@@ -64,9 +57,9 @@ export default function SimilarMatchesTable({ results }: SimilarMatchesTableProp
 
               const isExpanded = expandedId === match.external_id;
 
-              // Cell Backgrounds
-              const homeBg = homeWon ? 'bg-green-900/40 text-green-300' : (awayWon ? 'bg-red-900/40 text-red-300' : 'bg-yellow-900/40 text-yellow-300');
-              const awayBg = awayWon ? 'bg-green-900/40 text-green-300' : (homeWon ? 'bg-red-900/40 text-red-300' : 'bg-yellow-900/40 text-yellow-300');
+              // Cell Styles
+              const homeColor = homeWon ? 'text-primary' : (awayWon ? 'text-red-400' : 'text-yellow-400');
+              const awayColor = awayWon ? 'text-primary' : (homeWon ? 'text-red-400' : 'text-yellow-400');
 
               const dateStr = match.commence_time.split("T")[0];
 
@@ -74,76 +67,70 @@ export default function SimilarMatchesTable({ results }: SimilarMatchesTableProp
                 <Fragment key={match.external_id}>
                   <tr 
                     onClick={() => toggleExpand(match.external_id)}
-                    className={`cursor-pointer transition-colors ${isExpanded ? 'bg-blue-900/10' : 'hover:bg-slate-800/30'}`}
+                    className={`cursor-pointer transition-all hover:bg-white/[0.04] ${isExpanded ? 'bg-white/[0.06]' : ''}`}
                   >
-                    <td className="px-3 py-2 text-slate-400">{dateStr}</td>
-                    <td className={`px-3 py-2 font-bold ${homeBg}`}>{match.home_team}</td>
-                    <td className={`px-3 py-2 font-bold ${awayBg}`}>{match.away_team}</td>
+                    <td className="px-4 py-3 text-slate-500 font-medium">{dateStr}</td>
+                    <td className={`px-4 py-3 font-bold ${homeColor}`}>{match.home_team}</td>
+                    <td className={`px-4 py-3 font-bold ${awayColor}`}>{match.away_team}</td>
                     
-                    <td className="px-3 py-2 text-center text-slate-300">{hg}</td>
-                    <td className="px-3 py-2 text-center text-slate-300">{ag}</td>
+                    <td className="px-4 py-3 text-center font-black text-white">{hg}-{ag}</td>
+                    <td className="px-4 py-3 text-center text-slate-500 italic">{m.home_ht_goals}-{m.away_ht_goals}</td>
                     
-                    <td className="px-3 py-2 text-center text-slate-500 italic">{m.home_ht_goals ?? '-'}</td>
-                    <td className="px-3 py-2 text-center text-slate-500 italic">{m.away_ht_goals ?? '-'}</td>
+                    <td className="px-4 py-3 text-center text-yellow-500/80 font-bold">{m.total_yellow ?? '-'}</td>
+                    <td className="px-4 py-3 text-center text-red-500/80 font-bold">{m.total_red ?? '-'}</td>
+                    <td className="px-4 py-3 text-center text-cyan-500/80 font-bold">{m.total_corners ?? '-'}</td>
                     
-                    <td className="px-3 py-2 text-center text-slate-400">{m.home_yellow ?? '-'}</td>
-                    <td className="px-3 py-2 text-center text-slate-400">{m.away_yellow ?? '-'}</td>
+                    <td className="px-4 py-3 text-right font-black text-white">{h2h?.home ? h2h.home.toFixed(2) : '-'}</td>
+                    <td className="px-4 py-3 text-right font-black text-white">{h2h?.draw ? h2h.draw.toFixed(2) : '-'}</td>
+                    <td className="px-4 py-3 text-right font-black text-white">{h2h?.away ? h2h.away.toFixed(2) : '-'}</td>
                     
-                    <td className="px-3 py-2 text-center text-slate-400">{m.home_red ?? '-'}</td>
-                    <td className="px-3 py-2 text-center text-slate-400">{m.away_red ?? '-'}</td>
+                    <td className="px-4 py-3 text-right font-black text-slate-500">
+                      {totals?.under_2_5 != null ? totals.under_2_5.toFixed(2) : '-'} / {totals?.over_2_5 != null ? totals.over_2_5.toFixed(2) : '-'}
+                    </td>
                     
-                    <td className="px-3 py-2 text-center text-slate-400">{m.home_corners ?? '-'}</td>
-                    <td className="px-3 py-2 text-center text-slate-400">{m.away_corners ?? '-'}</td>
-                    
-                    <td className="px-3 py-2 text-right font-medium text-slate-300">{h2h?.home ? h2h.home.toFixed(2) : '-'}</td>
-                    <td className="px-3 py-2 text-right font-medium text-slate-300">{h2h?.draw ? h2h.draw.toFixed(2) : '-'}</td>
-                    <td className="px-3 py-2 text-right font-medium text-slate-300">{h2h?.away ? h2h.away.toFixed(2) : '-'}</td>
-                    
-                    <td className="px-3 py-2 text-right font-medium text-slate-300">{totals?.under_2_5 ? totals.under_2_5.toFixed(2) : '-'}</td>
-                    <td className="px-3 py-2 text-right font-medium text-slate-300">{totals?.over_2_5 ? totals.over_2_5.toFixed(2) : '-'}</td>
-                    
-                    <td className="px-3 py-2 text-center font-bold text-slate-300">{m.total_corners ?? '-'}</td>
-                    <td className="px-3 py-2 text-center font-bold text-slate-300">{m.total_yellow ?? '-'}</td>
-                    <td className="px-3 py-2 text-center font-bold text-slate-300">{m.total_red ?? '-'}</td>
+                    <td className="px-4 py-3 text-right">
+                       <span className="px-2 py-1 rounded bg-primary/10 text-primary font-black text-[10px]">%{item.similarity_percentage}</span>
+                    </td>
                   </tr>
                   {isExpanded && (
-                    <tr className="bg-slate-900/50 border-x border-slate-800">
-                      <td colSpan={21} className="px-6 py-4">
-                        <div className="flex flex-wrap gap-8 text-[11px] md:text-xs">
-                          {/* Sut İstatistikleri */}
+                    <tr className="bg-white/[0.01]">
+                      <td colSpan={13} className="px-8 py-6">
+                        <div className="flex flex-wrap gap-12">
                           <div className="flex flex-col gap-2">
-                            <span className="text-blue-400 font-bold uppercase tracking-wider">Şutlar</span>
-                            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                              <span className="text-slate-500">Toplam Şut (Ev/Dep):</span>
-                              <span className="text-slate-200 font-bold">{m.home_shots ?? '-'} / {m.away_shots ?? '-'}</span>
-                              <span className="text-slate-500">İsabetli Şut (Ev/Dep):</span>
-                              <span className="text-slate-200 font-bold">{m.home_shots_on_target ?? '-'} / {m.away_shots_on_target ?? '-'}</span>
-                              <span className="text-slate-500 font-medium">Toplam Şut:</span>
-                              <span className="text-blue-300 font-black">{m.total_shots ?? '-'}</span>
+                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Şut İstatistikleri</span>
+                            <div className="flex items-center gap-4">
+                               <div className="flex flex-col">
+                                  <span className="text-xl font-black text-white">{m.home_shots ?? '-'}/{m.away_shots ?? '-'}</span>
+                                  <span className="text-[9px] font-bold text-slate-600 uppercase">Ev/Dep Şut</span>
+                               </div>
+                               <div className="w-px h-8 bg-white/5"></div>
+                               <div className="flex flex-col">
+                                  <span className="text-xl font-black text-white">{m.home_shots_on_target ?? '-'}/{m.away_shots_on_target ?? '-'}</span>
+                                  <span className="text-[9px] font-bold text-slate-600 uppercase">İsabetli</span>
+                               </div>
                             </div>
                           </div>
 
-                          <div className="w-px h-12 bg-slate-800 self-center hidden md:block"></div>
-
-                          {/* Faul İstatistikleri */}
                           <div className="flex flex-col gap-2">
-                            <span className="text-yellow-500 font-bold uppercase tracking-wider">Fauller</span>
-                            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                              <span className="text-slate-500">Faul (Ev/Dep):</span>
-                              <span className="text-slate-200 font-bold">{m.home_fouls ?? '-'} / {m.away_fouls ?? '-'}</span>
-                              <span className="text-slate-500 font-medium">Toplam Faul:</span>
-                              <span className="text-yellow-300 font-black">{m.total_fouls ?? '-'}</span>
+                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Disiplin</span>
+                            <div className="flex items-center gap-4">
+                               <div className="flex flex-col">
+                                  <span className="text-xl font-black text-yellow-500">{m.home_yellow ?? '-'}/{m.away_yellow ?? '-'}</span>
+                                  <span className="text-[9px] font-bold text-slate-600 uppercase">Sarı Kart</span>
+                               </div>
+                               <div className="w-px h-8 bg-white/5"></div>
+                               <div className="flex flex-col">
+                                  <span className="text-xl font-black text-red-500">{m.home_red ?? '-'}/{m.away_red ?? '-'}</span>
+                                  <span className="text-[9px] font-bold text-slate-600 uppercase">Kırmızı</span>
+                               </div>
                             </div>
                           </div>
 
-                          <div className="w-px h-12 bg-slate-800 self-center hidden md:block"></div>
-
-                          {/* Oklid Mesafesi */}
                           <div className="flex flex-col gap-2">
-                            <span className="text-green-500 font-bold uppercase tracking-wider">Analiz Skoru</span>
-                            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-                              <span className="text-slate-500">Benzerlik Oranı:</span>
-                              <span className="text-green-400 font-bold">%{item.similarity_percentage}</span>
+                            <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Kornerler</span>
+                            <div className="flex flex-col">
+                               <span className="text-xl font-black text-cyan-500">{m.home_corners ?? '-'}/{m.away_corners ?? '-'}</span>
+                               <span className="text-[9px] font-bold text-slate-600 uppercase">Ev/Dep</span>
                             </div>
                           </div>
                         </div>

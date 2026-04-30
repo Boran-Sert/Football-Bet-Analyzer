@@ -35,7 +35,7 @@ class RateLimiter:
         if is_superuser:
             return
 
-        user_tier = getattr(request.state, "user_tier", UserTier.FREE.value)
+        user_tier = getattr(request.state, "user_tier", UserTier.STANDARD.value)
         user_id = getattr(request.state, "user_id", None)
 
         # Identifier: giris yapildiysa user_id, yapilmadiysa gercek IP
