@@ -1,7 +1,6 @@
 KLASÖR AĞACI
 ============
   .gitignore
-  cleanup_duplicates.py
   main.py
   pytest.ini
   README.md
@@ -181,55 +180,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-
-
---- DOSYA: cleanup_duplicates.py ---
-import asyncio
-import os
-import sys
-from collections import defaultdict
-from core.database import mongo
-
-# Proje yolunu ekle
-sys.path.append(os.getcwd())
-
-
-async def cleanup_duplicates():
-    await mongo.connect()
-    db = mongo.get_db()
-
-    print("[*] Mukerrer kayitlar temizleniyor...")
-
-    # Tum tamamlanmis maclari cek
-    cursor = db.matches.find({"status": "completed"})
-    docs = await cursor.to_list(length=None)
-
-    seen = {}
-    to_delete = []
-
-    for doc in docs:
-        # Benzersiz anahtar: Tarih (gun), Ev Sahibi, Deplasman
-        date_str = str(doc["commence_time"]).split()[0]
-        key = (date_str, doc["home_team"], doc["away_team"])
-
-        if key in seen:
-            # Zaten gorduysek bunu silineceklere ekle
-            to_delete.append(doc["_id"])
-        else:
-            seen[key] = doc["_id"]
-
-    if to_delete:
-        print(f"[!] {len(to_delete)} mukerrer kayit siliniyor...")
-        result = await db.matches.delete_many({"_id": {"$in": to_delete}})
-        print(f"[OK] {result.deleted_count} kayit silindi.")
-    else:
-        print("[+] Mukerrer kayit bulunmadi.")
-
-    await mongo.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(cleanup_duplicates())
 
 
 --- DOSYA: main.py ---
@@ -1584,6 +1534,11 @@ class MongoManager:
 
         # matches koleksiyonu
         await db.matches.create_index("external_id", unique=True)
+        await db.matches.create_index("status")
+        await db.matches.create_index("odds.h2h.home")
+        await db.matches.create_index("odds.h2h.draw")
+        await db.matches.create_index("odds.h2h.away")
+        
         await db.matches.create_index([
             ("sport", 1),
             ("league_key", 1),
@@ -4507,11 +4462,22 @@ async def login(
     credentials: UserLogin,
     auth_service: AuthService = Depends(get_auth_service),
 ):
+    # Brute-force check
+    if await auth_service.is_account_locked(credentials.email):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Çok fazla başarısız deneme. Hesabınız 15 dakika süreyle kilitlendi."
+        )
+
     user = await auth_service.repo.get_by_email(credentials.email)
     if not user or not auth_service.verify_password(
         credentials.password, user.hashed_password
     ):
+        await auth_service.record_login_failure(credentials.email)
         raise HTTPException(status_code=401, detail="Email veya sifre hatali.")
+
+    # Success: Reset attempts
+    await auth_service.reset_login_attempts(credentials.email)
 
     access_token = auth_service.create_access_token(
         user.id, user.tier, user.is_superuser
@@ -4699,6 +4665,7 @@ async def confirm_email_change(
 --- DOSYA: routers\billing.py ---
 """Odeme ve abonelik API yonlendiricisi — Provider Agnostic."""
 
+import json
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -4731,6 +4698,7 @@ async def get_billing_service() -> BillingService:
 from pydantic import BaseModel
 class CheckoutRequest(BaseModel):
     plan_id: str  # "pro" veya "elite"
+    identity_number: str = "11111111111"  # Default test value
 
 
 class GuestCheckoutRequest(BaseModel):
@@ -4738,6 +4706,7 @@ class GuestCheckoutRequest(BaseModel):
     email: str
     password: str
     display_name: str
+    identity_number: str = "11111111111"
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -4759,6 +4728,7 @@ async def get_plans():
 
 @router.post("/checkout")
 async def create_checkout_session(
+    request: Request,
     body: CheckoutRequest,
     current_user: UserInDB = Depends(get_current_active_user),
     billing_service: BillingService = Depends(get_billing_service),
@@ -4768,19 +4738,25 @@ async def create_checkout_session(
         raise HTTPException(status_code=400, detail="Gecersiz plan_id.")
 
     try:
+        ip = request.client.host if request.client else "127.0.0.1"
         checkout_url = await billing_service.create_checkout_session(
             user_id=current_user.id,
             user_email=current_user.email,
             plan_id=body.plan_id,
+            identity_number=body.identity_number,
+            ip=ip,
+            registration_date=current_user.created_at,
+            last_login_date=current_user.last_login_at
         )
         return {"checkout_url": checkout_url}
     except Exception as exc:
-        logger.error("Checkout hatasi: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error("Checkout hatasi [User: %s]: %s", current_user.email, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Ödeme oturumu başlatılamadı. Lütfen daha sonra tekrar deneyiniz.")
 
 
 @router.post("/guest-checkout")
 async def initialize_guest_checkout(
+    request: Request,
     body: GuestCheckoutRequest,
     billing_service: BillingService = Depends(get_billing_service),
 ):
@@ -4794,16 +4770,19 @@ async def initialize_guest_checkout(
         raise HTTPException(status_code=400, detail="Bu email adresi zaten kullaniliyor.")
 
     try:
+        ip = request.client.host if request.client else "127.0.0.1"
         reg_data = {
             "email": body.email,
             "password": body.password,
-            "display_name": body.display_name
+            "display_name": body.display_name,
+            "identity_number": body.identity_number,
+            "ip": ip
         }
         checkout_url = await billing_service.initialize_guest_checkout(reg_data, body.plan_id)
         return {"checkout_url": checkout_url}
     except Exception as exc:
-        logger.error("Guest Checkout hatasi: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error("Guest Checkout hatasi [Email: %s]: %s", body.email, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Ödeme ve kayıt işlemi başlatılamadı. Lütfen bilgilerinizi kontrol edip tekrar deneyiniz.")
 
 
 from fastapi.responses import RedirectResponse
@@ -4818,7 +4797,8 @@ async def billing_webhook(
     # Iyzico'da callback POST ile gelir, Stripe'da JSON payload gelir.
     try:
         payload = await request.json()
-    except:
+    except (json.JSONDecodeError, Exception) as e:
+        logger.debug("JSON parse hatasi, form datasi deneniyor: %s", e)
         payload = await request.form()
         payload = dict(payload)
 
@@ -4962,6 +4942,7 @@ class UserInDB(BaseModel):
     is_verified: bool = False
     is_superuser: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login_at: datetime | None = None
 
     model_config = {"from_attributes": True, "populate_by_name": True}
 
@@ -4974,6 +4955,7 @@ class UserResponse(BaseModel):
     is_verified: bool
     is_superuser: bool
     created_at: datetime
+    last_login_at: datetime | None = None
 
 
 class TokenData(BaseModel):
@@ -5454,6 +5436,34 @@ class AuthService:
         new_hash = self.get_password_hash(new_password)
         return await self.repo.update_password(user_id, new_hash)
 
+    # ── Brute Force Protection ───────────────────────────────────────────────
+
+    async def is_account_locked(self, email: str) -> bool:
+        """Kullanicinin brute-force korumasi nedeniyle kilitli olup olmadigini kontrol eder."""
+        redis = redis_manager.get_client()
+        lock_key = f"login_lock:{email}"
+        return await redis.exists(lock_key)
+
+    async def record_login_failure(self, email: str) -> int:
+        """Basarisiz giris denemesini kaydeder, 5 denemede 15 dk kilitler."""
+        redis = redis_manager.get_client()
+        attempts_key = f"login_attempts:{email}"
+        
+        attempts = await redis.incr(attempts_key)
+        if attempts == 1:
+            await redis.expire(attempts_key, 600)  # 10 dk icinde 5 deneme
+            
+        if attempts >= 5:
+            await redis.setex(f"login_lock:{email}", 900, "locked") # 15 dk kilit
+            await redis.delete(attempts_key)
+            
+        return attempts
+
+    async def reset_login_attempts(self, email: str):
+        """Basarili giriste deneme sayacini sifirlar."""
+        redis = redis_manager.get_client()
+        await redis.delete(f"login_attempts:{email}")
+
     # ── Access token ──────────────────────────────────────────────────────────
 
     def create_access_token(self, user_id: str, tier: UserTier, is_superuser: bool = False) -> str:
@@ -5676,12 +5686,14 @@ class BillingService:
         user_id: str,
         user_email: str,
         plan_id: str,
+        **kwargs
     ) -> str:
         """Secili provider uzerinden odeme oturumu olusturur."""
         return await self.provider.create_checkout_session(
             user_id=user_id,
             user_email=user_email,
-            plan_id=plan_id
+            plan_id=plan_id,
+            **kwargs
         )
 
     async def initialize_guest_checkout(self, reg_data: dict, plan_id: str) -> str:
@@ -5696,7 +5708,9 @@ class BillingService:
         return await self.provider.create_checkout_session(
             user_id=temp_id,
             user_email=reg_data["email"],
-            plan_id=plan_id
+            plan_id=plan_id,
+            identity_number=reg_data["identity_number"],
+            ip=reg_data["ip"]
         )
 
     async def handle_webhook(self, payload: Any, headers: Any) -> bool:
@@ -5820,6 +5834,7 @@ import logging
 import asyncio
 import iyzipay
 from typing import Any
+from datetime import datetime
 from core.config import settings
 from core.pricing import PLANS
 from services.payment.base import BasePaymentProvider
@@ -5857,14 +5872,14 @@ class IyzicoProvider(BasePaymentProvider):
             "enabledInstallments": ["1"],
             "buyer": {
                 "id": user_id,
-                "name": "User",
-                "surname": "Surname",
+                "name": kwargs.get("display_name", "User"),
+                "surname": "User",
                 "email": user_email,
-                "identityNumber": "11111111111",
-                "lastLoginDate": "2023-10-05 12:43:35",
-                "registrationDate": "2023-10-05 12:43:35",
+                "identityNumber": kwargs.get("identity_number", "11111111111"),
+                "lastLoginDate": self._format_date(kwargs.get("last_login_date")),
+                "registrationDate": self._format_date(kwargs.get("registration_date")),
                 "registrationAddress": "N/A",
-                "ip": "85.34.78.112",
+                "ip": kwargs.get("ip", "127.0.0.1"),
                 "city": "Istanbul",
                 "country": "Turkey",
                 "zipCode": "34000",
@@ -5950,6 +5965,12 @@ class IyzicoProvider(BasePaymentProvider):
 
         logger.warning("Iyzico odeme dogrulanamadi: %s", res_json.get("errorMessage"))
         return None
+
+    def _format_date(self, dt: datetime | None) -> str:
+        """Iyzico icin tarihi YYYY-MM-DD HH:mm:ss formatina donusturur."""
+        if not dt:
+            dt = datetime.utcnow()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 --- DOSYA: services\payment\stripe_provider.py ---

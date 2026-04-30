@@ -32,6 +32,7 @@ class UserInDB(BaseModel):
     is_verified: bool = False
     is_superuser: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_login_at: datetime | None = None
 
     model_config = {"from_attributes": True, "populate_by_name": True}
 
@@ -44,6 +45,7 @@ class UserResponse(BaseModel):
     is_verified: bool
     is_superuser: bool
     created_at: datetime
+    last_login_at: datetime | None = None
 
 
 class TokenData(BaseModel):

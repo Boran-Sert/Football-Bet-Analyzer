@@ -36,6 +36,34 @@ class AuthService:
         new_hash = self.get_password_hash(new_password)
         return await self.repo.update_password(user_id, new_hash)
 
+    # ── Brute Force Protection ───────────────────────────────────────────────
+
+    async def is_account_locked(self, email: str) -> bool:
+        """Kullanicinin brute-force korumasi nedeniyle kilitli olup olmadigini kontrol eder."""
+        redis = redis_manager.get_client()
+        lock_key = f"login_lock:{email}"
+        return await redis.exists(lock_key)
+
+    async def record_login_failure(self, email: str) -> int:
+        """Basarisiz giris denemesini kaydeder, 5 denemede 15 dk kilitler."""
+        redis = redis_manager.get_client()
+        attempts_key = f"login_attempts:{email}"
+        
+        attempts = await redis.incr(attempts_key)
+        if attempts == 1:
+            await redis.expire(attempts_key, 600)  # 10 dk icinde 5 deneme
+            
+        if attempts >= 5:
+            await redis.setex(f"login_lock:{email}", 900, "locked") # 15 dk kilit
+            await redis.delete(attempts_key)
+            
+        return attempts
+
+    async def reset_login_attempts(self, email: str):
+        """Basarili giriste deneme sayacini sifirlar."""
+        redis = redis_manager.get_client()
+        await redis.delete(f"login_attempts:{email}")
+
     # ── Access token ──────────────────────────────────────────────────────────
 
     def create_access_token(self, user_id: str, tier: UserTier, is_superuser: bool = False) -> str:

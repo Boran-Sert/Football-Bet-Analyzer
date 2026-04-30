@@ -27,12 +27,14 @@ class BillingService:
         user_id: str,
         user_email: str,
         plan_id: str,
+        **kwargs
     ) -> str:
         """Secili provider uzerinden odeme oturumu olusturur."""
         return await self.provider.create_checkout_session(
             user_id=user_id,
             user_email=user_email,
-            plan_id=plan_id
+            plan_id=plan_id,
+            **kwargs
         )
 
     async def initialize_guest_checkout(self, reg_data: dict, plan_id: str) -> str:
@@ -47,7 +49,9 @@ class BillingService:
         return await self.provider.create_checkout_session(
             user_id=temp_id,
             user_email=reg_data["email"],
-            plan_id=plan_id
+            plan_id=plan_id,
+            identity_number=reg_data["identity_number"],
+            ip=reg_data["ip"]
         )
 
     async def handle_webhook(self, payload: Any, headers: Any) -> bool:

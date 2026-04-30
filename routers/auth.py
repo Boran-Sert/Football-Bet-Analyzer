@@ -74,11 +74,22 @@ async def login(
     credentials: UserLogin,
     auth_service: AuthService = Depends(get_auth_service),
 ):
+    # Brute-force check
+    if await auth_service.is_account_locked(credentials.email):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Çok fazla başarısız deneme. Hesabınız 15 dakika süreyle kilitlendi."
+        )
+
     user = await auth_service.repo.get_by_email(credentials.email)
     if not user or not auth_service.verify_password(
         credentials.password, user.hashed_password
     ):
+        await auth_service.record_login_failure(credentials.email)
         raise HTTPException(status_code=401, detail="Email veya sifre hatali.")
+
+    # Success: Reset attempts
+    await auth_service.reset_login_attempts(credentials.email)
 
     access_token = auth_service.create_access_token(
         user.id, user.tier, user.is_superuser

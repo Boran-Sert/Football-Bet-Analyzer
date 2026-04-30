@@ -37,6 +37,11 @@ class MongoManager:
 
         # matches koleksiyonu
         await db.matches.create_index("external_id", unique=True)
+        await db.matches.create_index("status")
+        await db.matches.create_index("odds.h2h.home")
+        await db.matches.create_index("odds.h2h.draw")
+        await db.matches.create_index("odds.h2h.away")
+        
         await db.matches.create_index([
             ("sport", 1),
             ("league_key", 1),

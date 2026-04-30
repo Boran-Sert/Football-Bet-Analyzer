@@ -2,6 +2,7 @@ import logging
 import asyncio
 import iyzipay
 from typing import Any
+from datetime import datetime
 from core.config import settings
 from core.pricing import PLANS
 from services.payment.base import BasePaymentProvider
@@ -39,14 +40,14 @@ class IyzicoProvider(BasePaymentProvider):
             "enabledInstallments": ["1"],
             "buyer": {
                 "id": user_id,
-                "name": "User",
-                "surname": "Surname",
+                "name": kwargs.get("display_name", "User"),
+                "surname": "User",
                 "email": user_email,
-                "identityNumber": "11111111111",
-                "lastLoginDate": "2023-10-05 12:43:35",
-                "registrationDate": "2023-10-05 12:43:35",
+                "identityNumber": kwargs.get("identity_number", "11111111111"),
+                "lastLoginDate": self._format_date(kwargs.get("last_login_date")),
+                "registrationDate": self._format_date(kwargs.get("registration_date")),
                 "registrationAddress": "N/A",
-                "ip": "85.34.78.112",
+                "ip": kwargs.get("ip", "127.0.0.1"),
                 "city": "Istanbul",
                 "country": "Turkey",
                 "zipCode": "34000",
@@ -132,3 +133,9 @@ class IyzicoProvider(BasePaymentProvider):
 
         logger.warning("Iyzico odeme dogrulanamadi: %s", res_json.get("errorMessage"))
         return None
+
+    def _format_date(self, dt: datetime | None) -> str:
+        """Iyzico icin tarihi YYYY-MM-DD HH:mm:ss formatina donusturur."""
+        if not dt:
+            dt = datetime.utcnow()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
