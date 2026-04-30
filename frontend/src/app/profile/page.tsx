@@ -10,6 +10,8 @@ export default function ProfilePage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [submittingEmail, setSubmittingEmail] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
@@ -77,6 +79,37 @@ export default function ProfilePage() {
     }
   };
 
+  const handleEmailChange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setSuccess("");
+    setSubmittingEmail(true);
+
+    try {
+      const token = localStorage.getItem("token");
+      const res = await fetch("http://127.0.0.1:8000/api/v1/auth/request-email-change", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ new_email: newEmail })
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        setSuccess("Yeni email adresinize doğrulama linki gönderildi.");
+        setNewEmail("");
+      } else {
+        setError(data.detail || "Email değişikliği başlatılamadı.");
+      }
+    } catch (err) {
+      setError("Bir hata oluştu.");
+    } finally {
+      setSubmittingEmail(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -123,10 +156,13 @@ export default function ProfilePage() {
              </div>
           </div>
 
-          {/* CHANGE PASSWORD FORM */}
-          <div className="lg:col-span-2">
+          {/* CHANGE PASSWORD & EMAIL FORMS */}
+          <div className="lg:col-span-2 flex flex-col gap-8">
+             {/* PASSWORD FORM */}
              <div className="glass rounded-[2rem] p-10 card-shadow border border-white/5">
                 <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8">Şifre Değiştir</h3>
+                {/* ... (existing error/success/form logic for password) ... */}
+                {/* (I will re-write it correctly below) */}
                 
                 {error && (
                   <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl">
@@ -150,7 +186,6 @@ export default function ProfilePage() {
                         onChange={(e) => setPasswordData({ ...passwordData, current_password: e.target.value })}
                       />
                    </div>
-                   
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div className="space-y-2">
                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-4">Yeni Şifre</label>
@@ -174,14 +209,32 @@ export default function ProfilePage() {
                          />
                       </div>
                    </div>
-
                    <div className="pt-4">
-                      <button 
-                        type="submit" 
-                        disabled={submitting}
-                        className="px-10 py-4 bg-primary text-black font-black rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all emerald-glow uppercase text-xs tracking-widest disabled:opacity-50"
-                      >
+                      <button type="submit" disabled={submitting} className="px-10 py-4 bg-primary text-black font-black rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all emerald-glow uppercase text-xs tracking-widest disabled:opacity-50">
                         {submitting ? "Güncelleniyor..." : "Şifreyi Güncelle"}
+                      </button>
+                   </div>
+                </form>
+             </div>
+
+             {/* EMAIL FORM */}
+             <div className="glass rounded-[2rem] p-10 card-shadow border border-white/5">
+                <h3 className="text-lg font-black text-white uppercase tracking-tight mb-8">E-posta Adresini Değiştir</h3>
+                <form onSubmit={handleEmailChange} className="space-y-6">
+                   <div className="space-y-2">
+                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-4">Yeni E-posta Adresi</label>
+                      <input
+                        type="email"
+                        required
+                        className="w-full bg-white/[0.03] border border-white/5 rounded-2xl p-4 text-white outline-none focus:border-primary/50 transition-all font-medium"
+                        value={newEmail}
+                        onChange={(e) => setNewEmail(e.target.value)}
+                        placeholder="örnek@mail.com"
+                      />
+                   </div>
+                   <div className="pt-4">
+                      <button type="submit" disabled={submittingEmail} className="px-10 py-4 bg-white/5 text-white font-black rounded-2xl hover:bg-white/10 transition-all uppercase text-xs tracking-widest disabled:opacity-50">
+                        {submittingEmail ? "Gönderiliyor..." : "Değişiklik İsteği Gönder"}
                       </button>
                    </div>
                 </form>

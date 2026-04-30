@@ -155,6 +155,37 @@ class AuthService:
         except JWTError:
             return False
 
+    # ── Email change ──────────────────────────────────────────────────────────
+
+    def create_email_change_token(self, user_id: str, new_email: str) -> str:
+        expire = datetime.utcnow() + timedelta(hours=2)
+        to_encode = {
+            "sub": user_id,
+            "new_email": new_email,
+            "type": "email_change",
+            "exp": expire
+        }
+        return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+
+    async def confirm_email_change(self, token: str) -> bool:
+        try:
+            payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+            user_id: str = payload.get("sub")
+            new_email: str = payload.get("new_email")
+            token_type: str = payload.get("type")
+            
+            if not user_id or not new_email or token_type != "email_change":
+                return False
+            
+            # Check if email is already taken
+            existing = await self.repo.get_by_email(new_email)
+            if existing:
+                return False
+                
+            return await self.repo.update_email(user_id, new_email)
+        except JWTError:
+            return False
+
     # ── Password reset ────────────────────────────────────────────────────────
 
     def create_password_reset_token(self, email: str) -> str:

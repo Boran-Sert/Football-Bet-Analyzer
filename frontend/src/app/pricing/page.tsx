@@ -37,8 +37,8 @@ export default function PricingPage() {
     try {
       const token = localStorage.getItem("token");
       if (!token) {
-        alert("Lütfen önce giriş yapın.");
-        window.location.href = "/login";
+        // Redirect to register with plan_id
+        window.location.href = `/register?plan=${planId}`;
         return;
       }
 
@@ -92,7 +92,7 @@ export default function PricingPage() {
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-8 md:grid-cols-2 lg:max-w-5xl lg:mx-auto px-4">
+      <div className="grid grid-cols-1 gap-8 md:grid-cols-3 lg:max-w-7xl lg:mx-auto px-4">
         {plans.map((plan) => {
           const isElite = plan.id === "elite";
           return (

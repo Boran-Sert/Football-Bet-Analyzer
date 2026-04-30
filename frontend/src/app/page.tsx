@@ -170,7 +170,7 @@ export default function Home() {
               {recommendedMatches.length > 0 ? recommendedMatches.map((m) => (
                 <div key={m.external_id} onClick={() => handleSelectMatch(m)} className="bg-white/5 border border-white/5 hover:border-primary/30 p-4 rounded-2xl transition-all cursor-pointer group">
                   <div className="flex flex-col gap-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase truncate">{m.league_name}</span>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase truncate">{m.league_title}</span>
                     <span className="text-sm font-black text-white truncate">{m.home_team}</span>
                     <span className="text-sm font-black text-white truncate">{m.away_team}</span>
                   </div>

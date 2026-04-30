@@ -67,3 +67,14 @@ class UserRepository:
             return result.modified_count > 0
         except Exception:
             return False
+
+    async def update_email(self, user_id: str, new_email: str) -> bool:
+        """Kullanicinin email adresini gunceller."""
+        try:
+            result = await self.collection.update_one(
+                {"_id": ObjectId(user_id)},
+                {"$set": {"email": new_email, "is_verified": False}},  # Re-verify maybe?
+            )
+            return result.modified_count > 0
+        except Exception:
+            return False

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     # ── Email (Resend) ──
     RESEND_API_KEY: str = ""
     FRONTEND_URL: str = "http://localhost:3000"
+    API_BASE_URL: str = "http://localhost:8000"
 
     # ── Stripe (GAP 4) ──────────────────────────────────────────────────────
     # Get these from https://dashboard.stripe.com/apikeys

@@ -5,6 +5,17 @@ from schemas.auth import UserTier
 
 # Plan tanımları
 PLANS: dict[str, dict[str, Any]] = {
+    "standard": {
+        "name": "Standard Plan",
+        "tier": UserTier.STANDARD,
+        "price_try": 100.00,
+        "price_usd": 4.90,
+        "features": [
+            "3 benzer mac analizi",
+            "60 istek/dk",
+            "Temel istatistikler"
+        ]
+    },
     "pro": {
         "name": "Pro Plan",
         "tier": UserTier.PRO,

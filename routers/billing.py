@@ -34,6 +34,13 @@ class CheckoutRequest(BaseModel):
     plan_id: str  # "pro" veya "elite"
 
 
+class GuestCheckoutRequest(BaseModel):
+    plan_id: str
+    email: str
+    password: str
+    display_name: str
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/plans")
@@ -73,16 +80,43 @@ async def create_checkout_session(
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.post("/guest-checkout")
+async def initialize_guest_checkout(
+    body: GuestCheckoutRequest,
+    billing_service: BillingService = Depends(get_billing_service),
+):
+    """Kayit ve odeme islemini birlikte baslatir (Kullanici henuz DB'de yok)."""
+    if body.plan_id not in PLANS:
+        raise HTTPException(status_code=400, detail="Gecersiz plan_id.")
+
+    # Email kontrolü
+    existing = await billing_service.repo.get_by_email(body.email)
+    if existing:
+        raise HTTPException(status_code=400, detail="Bu email adresi zaten kullaniliyor.")
+
+    try:
+        reg_data = {
+            "email": body.email,
+            "password": body.password,
+            "display_name": body.display_name
+        }
+        checkout_url = await billing_service.initialize_guest_checkout(reg_data, body.plan_id)
+        return {"checkout_url": checkout_url}
+    except Exception as exc:
+        logger.error("Guest Checkout hatasi: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+from fastapi.responses import RedirectResponse
+from core.config import settings
+
 @router.post("/webhook")
 async def billing_webhook(
     request: Request,
     billing_service: BillingService = Depends(get_billing_service),
 ):
-    """Odeme saglayicidan gelen webhook/callback olaylarini isler."""
+    """Odeme saglayicidan gelen webhook/callback olaylarini isler ve kullanıcıyı yönlendirir."""
     # Iyzico'da callback POST ile gelir, Stripe'da JSON payload gelir.
-    # BaseProvider her ikisini de handle edecek sekilde tasarlandi.
-    
-    # Payload'u her ihtimale karsi hem form hem json olarak deniyoruz
     try:
         payload = await request.json()
     except:
@@ -92,7 +126,16 @@ async def billing_webhook(
     headers = request.headers
     
     success = await billing_service.handle_webhook(payload, headers)
-    if success:
-        return {"status": "ok"}
     
-    raise HTTPException(status_code=400, detail="Webhook islenemedi.")
+    if success:
+        # Odeme basariliysa giris sayfasina yonlendir (veya dashboard)
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/login?payment=success", 
+            status_code=303
+        )
+    
+    # Basarisizsa planlar sayfasina hata ile don
+    return RedirectResponse(
+        url=f"{settings.FRONTEND_URL}/pricing?error=payment_failed", 
+        status_code=303
+    )

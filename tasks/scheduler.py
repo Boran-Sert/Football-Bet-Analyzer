@@ -52,14 +52,14 @@ def configure_scheduler() -> None:
         )
 
     # Tarihsel veri yukleme (bir kez, 10 saniye sonra)
-    scheduler.add_job(
-        seed_historical_data,
-        trigger=DateTrigger(
-            run_date=datetime.datetime.now(datetime.timezone.utc)
-            + datetime.timedelta(seconds=10)
-        ),
-        id="seed_historical_data",
-        name="Tarihsel CSV verisi yukleme (tek seferlik)",
-        replace_existing=True,
-    )
-    logger.info("Tek seferlik job kayitli: seed_historical_data (10s sonra)")
+    # scheduler.add_job(
+    #     seed_historical_data,
+    #     trigger=DateTrigger(
+    #         run_date=datetime.datetime.now(datetime.timezone.utc)
+    #         + datetime.timedelta(seconds=10)
+    #     ),
+    #     id="seed_historical_data",
+    #     name="Tarihsel CSV verisi yukleme (tek seferlik)",
+    #     replace_existing=True,
+    # )
+    # logger.info("Tek seferlik job kayitli: seed_historical_data (10s sonra)")

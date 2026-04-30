@@ -1,31 +1,45 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
-export default function Register() {
+function RegisterContent() {
   const [formData, setFormData] = useState({ display_name: "", email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const planId = searchParams.get("plan");
+
+  useEffect(() => {
+    if (!planId) {
+      router.push("/pricing");
+    }
+  }, [planId, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/v1/auth/register", {
+      // Guest Checkout: Kayıt ve Ödeme birlikte
+      const response = await fetch("http://127.0.0.1:8000/api/v1/billing/guest-checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          ...formData,
+          plan_id: planId
+        }),
       });
-      if (response.ok) {
-        router.push("/login");
+
+      const data = await response.json();
+      if (response.ok && data.checkout_url) {
+        // Iyzico ödeme sayfasına yönlendir
+        window.location.href = data.checkout_url;
       } else {
-        const data = await response.json();
         const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
-        setError(typeof errMsg === "string" ? errMsg : "Kayıt sırasında bir hata oluştu.");
+        setError(typeof errMsg === "string" ? errMsg : "İşlem sırasında bir hata oluştu.");
       }
     } catch (err) {
       setError("Sunucuya bağlanılamadı.");
@@ -34,9 +48,10 @@ export default function Register() {
     }
   };
 
+  if (!planId) return null;
+
   return (
     <div className="min-h-[90vh] flex items-center justify-center relative overflow-hidden">
-      {/* Decorative background elements */}
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-primary/10 blur-[120px] rounded-full pointer-events-none"></div>
       
       <div className="glass rounded-[2.5rem] p-12 w-full max-w-md card-shadow relative z-10 border border-white/5">
@@ -45,7 +60,7 @@ export default function Register() {
              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
           </div>
           <h1 className="text-3xl font-black text-white text-center uppercase tracking-tighter">Hesap Oluştur</h1>
-          <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-2">Analiz dünyasına katılın</p>
+          <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-2">Seçilen Plan: <span className="text-primary">{planId.toUpperCase()}</span></p>
         </div>
 
         {error && (
@@ -66,7 +81,6 @@ export default function Register() {
               onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
             />
           </div>
-
           <div className="space-y-2">
             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-4">E-posta Adresi</label>
             <input
@@ -78,7 +92,6 @@ export default function Register() {
               onChange={(e) => setFormData({ ...formData, email: e.target.value })}
             />
           </div>
-          
           <div className="space-y-2">
             <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-4">Şifre</label>
             <input
@@ -91,13 +104,8 @@ export default function Register() {
               onChange={(e) => setFormData({ ...formData, password: e.target.value })}
             />
           </div>
-
-          <button 
-            type="submit" 
-            disabled={loading}
-            className="w-full bg-primary text-black font-black py-4 rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all mt-4 emerald-glow uppercase text-xs tracking-widest disabled:opacity-50"
-          >
-            {loading ? "Hesap Oluşturuluyor..." : "Kayıt Ol"}
+          <button type="submit" disabled={loading} className="w-full bg-primary text-black font-black py-4 rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all mt-4 emerald-glow uppercase text-xs tracking-widest disabled:opacity-50">
+            {loading ? "İşleniyor..." : "Ödemeye Geç"}
           </button>
         </form>
 
@@ -109,5 +117,13 @@ export default function Register() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function Register() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-screen"><div className="animate-spin rounded-full h-12 w-12 border-t-2 border-primary"></div></div>}>
+      <RegisterContent />
+    </Suspense>
   );
 }

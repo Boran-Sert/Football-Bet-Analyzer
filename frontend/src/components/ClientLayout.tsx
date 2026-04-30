@@ -1,14 +1,36 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import TopHeader from "@/components/TopHeader";
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const isAuthPage = pathname === "/login" || pathname === "/register";
+  const router = useRouter();
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
 
-  if (isAuthPage) {
+  const publicRoutes = ["/login", "/register", "/pricing", "/confirm-email-change", "/billing/success"];
+  const isPublicPage = publicRoutes.includes(pathname);
+
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token && !isPublicPage) {
+      router.push("/login");
+    } else {
+      setIsAuthChecking(false);
+    }
+  }, [pathname, isPublicPage, router]);
+
+  if (isAuthChecking && !isPublicPage) {
+    return (
+      <div className="flex items-center justify-center w-full min-h-screen">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  if (isPublicPage) {
     return <main className="w-full">{children}</main>;
   }
 
