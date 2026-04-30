@@ -30,13 +30,13 @@ class IyzicoProvider(BasePaymentProvider):
             raise ValueError(f"Gecersiz plan: {plan_id}")
 
         request = {
-            'locale': iyzipay.BaseRequest.LOCALE_TR,
+            'locale': 'tr',
             'conversationId': user_id,
             'price': str(plan["price_try"]),
             'paidPrice': str(plan["price_try"]),
-            'currency': iyzipay.BaseRequest.CURRENCY_TRY,
+            'currency': 'TRY',
             'basketId': f"B_{user_id}",
-            'paymentGroup': iyzipay.BaseRequest.PAYMENT_GROUP_LISTING,
+            'paymentGroup': 'LISTING',
             'callbackUrl': f"{settings.FRONTEND_URL}/billing/success",
             'enabledInstallments': ['1'],
             'buyer': {
@@ -72,7 +72,7 @@ class IyzicoProvider(BasePaymentProvider):
                     'id': plan_id,
                     'name': plan["name"],
                     'category1': 'Subscription',
-                    'itemType': iyzipay.BaseRequest.BASKET_ITEM_TYPE_VIRTUAL,
+                    'itemType': 'VIRTUAL',
                     'price': str(plan["price_try"])
                 }
             ]
@@ -100,7 +100,7 @@ class IyzicoProvider(BasePaymentProvider):
         if not token:
             return None
 
-        request = {'locale': iyzipay.BaseRequest.LOCALE_TR, 'token': token}
+        request = {'locale': 'tr', 'token': token}
         
         checkout_form = await asyncio.to_thread(
             iyzipay.CheckoutForm().retrieve, request, self.options

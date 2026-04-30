@@ -1,7 +1,7 @@
 """Uygulama yapilandirmasi."""
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import ClassVar
 
 
@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     # ── Iyzico (GAP 7) ──────────────────────────────────────────────────────
     IYZICO_API_KEY: str = ""
     IYZICO_SECRET_KEY: str = ""
-    IYZICO_BASE_URL: str = "https://sandbox-api.iyzipay.com"  # default sandbox
+    IYZICO_BASE_URL: str = "sandbox-api.iyzipay.com"  # Iyzico SDK HTTPSConnection için protokol içermemeli
 
     # ── Scheduler ──
     SCHEDULER_SLOTS: list[dict] = [
@@ -94,6 +94,13 @@ class Settings(BaseSettings):
         "soccer_netherlands_eredivisie",
         "soccer_belgium_first_div",
     ]
+    
+    @field_validator("IYZICO_BASE_URL", mode="before")
+    @classmethod
+    def sanitize_iyzico_url(cls, v: str) -> str:
+        if not v:
+            return v
+        return v.replace("https://", "").replace("http://", "").rstrip("/")
 
     model_config = {
         "env_file": ".env",

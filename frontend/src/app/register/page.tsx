@@ -22,7 +22,8 @@ export default function Register() {
         router.push("/login");
       } else {
         const data = await response.json();
-        setError(data.detail || "Kayıt sırasında bir hata oluştu.");
+        const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
+        setError(typeof errMsg === "string" ? errMsg : "Kayıt sırasında bir hata oluştu.");
       }
     } catch (err) {
       setError("Sunucuya bağlanılamadı.");

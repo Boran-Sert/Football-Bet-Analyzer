@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 from services.billing_service import BillingService
 from services.payment.iyzico_provider import IyzicoProvider
 from schemas.auth import UserTier
+from unittest.mock import patch, MagicMock
 
 
 @pytest.fixture
@@ -70,3 +71,24 @@ class TestIyzicoProvider:
         provider = IyzicoProvider()
         with pytest.raises(ValueError, match="Gecersiz plan"):
             await provider.create_checkout_session("u1", "e1", "non_existent_plan")
+
+
+@pytest.mark.asyncio
+async def test_iyzico_provider_request_logic():
+    provider = IyzicoProvider()
+
+    with patch("iyzipay.CheckoutFormInitialize.create") as mock_create:
+        # Iyzico cevabını taklit et
+        mock_res = MagicMock()
+        mock_res.read.return_value = (
+            b'{"status": "success", "paymentPageUrl": "https://test-link"}'
+        )
+        mock_create.return_value = mock_res
+
+        url = await provider.create_checkout_session("u1", "e@e.com", "pro")
+
+        assert url == "https://test-link"
+        # Request içeriğini doğrula
+        args, _ = mock_create.call_args
+        from core.pricing import PLANS
+        assert args[0]["price"] == str(PLANS["pro"]["price_try"])

@@ -16,8 +16,8 @@ export default function Login() {
     try {
       const response = await fetch("http://127.0.0.1:8000/api/v1/auth/login", {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ username: email, password: password }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email, password: password }),
       });
       const data = await response.json();
       if (response.ok) {
@@ -25,7 +25,8 @@ export default function Login() {
         window.dispatchEvent(new Event('auth-change'));
         router.push("/");
       } else {
-        setError(data.detail || "Giriş yapılamadı. Bilgilerinizi kontrol edin.");
+        const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
+        setError(typeof errMsg === "string" ? errMsg : "Giriş yapılamadı. Bilgilerinizi kontrol edin.");
       }
     } catch (err) {
       setError("Sunucuya bağlanılamadı.");

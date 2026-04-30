@@ -104,7 +104,8 @@ export default function Home() {
       const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.detail || "Analiz yapılamadı.");
+        const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
+        throw new Error((typeof errMsg === "string" ? errMsg : null) || "Analiz yapılamadı.");
       }
 
       setSimilarMatches(data);

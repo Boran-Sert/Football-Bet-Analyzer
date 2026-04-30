@@ -41,8 +41,13 @@ export default function Navbar() {
             Sports-Analyzer
           </span>
         </Link>
-        
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-6">
+          <Link 
+            href="/pricing" 
+            className="text-slate-300 hover:text-white text-sm font-medium transition-colors"
+          >
+            Planlar
+          </Link>
           {isLoggedIn ? (
             <>
               <div className="px-3 py-1 rounded-full bg-slate-800 border border-slate-700 text-xs font-semibold tracking-wider text-slate-300">
