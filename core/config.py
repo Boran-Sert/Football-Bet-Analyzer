@@ -2,7 +2,7 @@
 
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
-from typing import ClassVar
+from typing import ClassVar, Any
 
 
 class TierLimits:
@@ -33,7 +33,15 @@ class TierLimits:
 class Settings(BaseSettings):
     # ── Database ──
     MONGO_URI: str
+    MONGO_TLS_SKIP_VERIFY: bool = False
     REDIS_URL: str = "redis://localhost:6379"
+
+    ENVIRONMENT: str = "development"
+    PAYMENT_PROVIDER: str = "iyzico"
+    
+    # Telegram Notifications (Faz 3 - Lightweight Alerting)
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_CHAT_ID: str | None = None
 
     # ── External APIs ──
     ODDS_API_KEY: str
@@ -74,12 +82,7 @@ class Settings(BaseSettings):
     ACTIVE_SPORTS: list[str] = Field(default=["football"])
 
     # ── CORS ──
-    ALLOWED_ORIGINS: list[str] = Field(
-        default=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ]
-    )
+    ALLOWED_ORIGINS: Any = Field(default=["http://localhost:3000", "http://127.0.0.1:3000"])
 
     # ── Odds API ──
     ODDS_API_BASE_URL: str = "https://api.the-odds-api.com/v4"
@@ -102,6 +105,13 @@ class Settings(BaseSettings):
         if not v:
             return v
         return v.replace("https://", "").replace("http://", "").rstrip("/")
+
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @classmethod
+    def parse_allowed_origins(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            return [i.strip() for i in v.split(",")]
+        return v
 
     model_config = {
         "env_file": ".env",

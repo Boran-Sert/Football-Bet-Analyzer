@@ -11,7 +11,9 @@ Endpoints:
   GET  /api/v1/auth/me              — Profil bilgisi
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+import hashlib
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, Request
 
 from clients.email_client import email_client
 from core.config import settings
@@ -27,6 +29,7 @@ from schemas.auth import (
     UserInDB,
     UserLogin,
     UserResponse,
+    AccountDeleteRequest,
 )
 from services.auth_service import AuthService
 from utils.dependencies import get_auth_service, get_current_active_user
@@ -42,6 +45,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 )
 async def register(
     user_in: UserCreate,
+    response: Response,
     background_tasks: BackgroundTasks,
     auth_service: AuthService = Depends(get_auth_service),
 ):
@@ -63,6 +67,26 @@ async def register(
     refresh_token = await auth_service.create_refresh_token(
         user.id, user.tier, user.is_superuser
     )
+
+    # Cookie tabanli auth (Faz 1)
+    is_prod = settings.ENVIRONMENT == "production"
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+    )
+
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
@@ -72,6 +96,7 @@ async def register(
 @router.post("/login", response_model=TokenResponse)
 async def login(
     credentials: UserLogin,
+    response: Response,
     auth_service: AuthService = Depends(get_auth_service),
 ):
     # Brute-force check
@@ -97,6 +122,26 @@ async def login(
     refresh_token = await auth_service.create_refresh_token(
         user.id, user.tier, user.is_superuser
     )
+
+    # Cookie tabanli auth (Faz 1)
+    is_prod = settings.ENVIRONMENT == "production"
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+    )
+
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
@@ -105,27 +150,62 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_access_token(
-    body: RefreshRequest,
+    request: Request,
+    response: Response,
+    body: Optional[RefreshRequest] = None,
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Gecerli bir refresh token ile yeni bir access + refresh token cifti uretir.
 
     Eski refresh token otomatik olarak iptal edilir (token rotation).
     """
-    token_data = await auth_service.verify_refresh_token(body.refresh_token)
-    if not token_data:
+    refresh_token = (body.refresh_token if body else None) or request.cookies.get("refresh_token")
+    
+    if not refresh_token:
         raise HTTPException(
-            status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
+            status_code=401, detail="Refresh token bulunamadi."
         )
 
-    # Rotate: revoke old, issue new pair
-    await auth_service.revoke_refresh_token(body.refresh_token)
+    # Distributed Lock (Faz 6 Fix: Race Condition / Token Cloning)
+    from core.redis_client import redis_manager
+    redis = redis_manager.get_client()
+    lock_key = f"lock:refresh:{hashlib.md5(refresh_token.encode()).hexdigest()}"
+    
+    async with redis.lock(lock_key, timeout=10):
+        token_data = await auth_service.verify_refresh_token(refresh_token)
+        if not token_data:
+            raise HTTPException(
+                status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
+            )
+    
+        # Rotate: revoke old, issue new pair
+        await auth_service.revoke_refresh_token(refresh_token)
     new_access = auth_service.create_access_token(
         token_data.user_id, token_data.tier, token_data.is_superuser
     )
     new_refresh = await auth_service.create_refresh_token(
         token_data.user_id, token_data.tier, token_data.is_superuser
     )
+
+    # Cookie tabanli auth (Faz 1)
+    is_prod = settings.ENVIRONMENT == "production"
+    response.set_cookie(
+        key="access_token",
+        value=new_access,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+    )
+
     return TokenResponse(access_token=new_access, refresh_token=new_refresh)
 
 
@@ -134,13 +214,27 @@ async def refresh_access_token(
 
 @router.post("/logout", status_code=200)
 async def logout(
-    body: RefreshRequest,
+    request: Request,
+    response: Response,
     current_user: UserInDB = Depends(get_current_active_user),
     auth_service: AuthService = Depends(get_auth_service),
 ):
-    """Refresh token'i iptal eder. Access token kendi TTL'i dolana kadar gecerli kalir
-    (kisa TTL — 30 dk — bunu tolere edilebilir kilar)."""
-    await auth_service.revoke_refresh_token(body.refresh_token)
+    """Refresh token'i iptal eder ve cookieleri temizler."""
+    refresh_token = request.cookies.get("refresh_token")
+    
+    if refresh_token:
+        await auth_service.revoke_refresh_token(refresh_token)
+    # Cookieleri temizle (Faz 6 Fix: Ghost Cookies)
+    is_prod = settings.ENVIRONMENT == "production"
+    cookie_params = {
+        "path": "/",
+        "httponly": True,
+        "secure": is_prod,
+        "samesite": "strict",
+    }
+    response.delete_cookie("access_token", **cookie_params)
+    response.delete_cookie("refresh_token", **cookie_params)
+    
     return {"message": "Basariyla cikis yapildi."}
 
 
@@ -272,3 +366,26 @@ async def confirm_email_change(
             status_code=400, detail="Gecersiz veya suresi dolmus dogrulama token'i."
         )
     return {"message": "Email adresiniz basariyla guncellendi."}
+
+# ── Account Deletion (GDPR) ───────────────────────────────────────────────────
+
+@router.delete("/account", status_code=status.HTTP_200_OK)
+async def delete_account(
+    body: AccountDeleteRequest,
+    response: Response,
+    current_user: UserInDB = Depends(get_current_active_user),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """Kullanicinin hesabini ve verilerini kalici olarak siler (GDPR)."""
+    success = await auth_service.delete_account(current_user.id, body.password)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sifre hatali veya hesap silinemedi."
+        )
+    
+    # Cookieleri temizle
+    response.delete_cookie("access_token")
+    response.delete_cookie("refresh_token")
+    
+    return {"message": "Hesabiniz ve tum verileriniz basariyla silindi."}

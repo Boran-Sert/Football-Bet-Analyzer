@@ -8,11 +8,13 @@ from middleware.rate_limiter import RateLimiter
 from schemas.match import MatchResponse, MatchListResponse
 from services.match_service import MatchService
 from utils.dependencies import get_match_service
+from utils.cache import cache_response
 
 router = APIRouter(prefix="/api/v1/football/matches", tags=["Football Matches"])
 
 
 @router.get("/", response_model=MatchListResponse, dependencies=[Depends(RateLimiter())])
+@cache_response(expire=300, key_prefix="matches")
 async def get_upcoming_matches(
     league: str | None = Query(None, description="Lig koduna gore filtrele (orn: soccer_epl)"),
     page: int = Query(1, ge=1, description="Sayfa numarasi"),
@@ -42,6 +44,7 @@ async def get_upcoming_matches(
 
 
 @router.get("/leagues", response_model=list[str], dependencies=[Depends(RateLimiter())])
+@cache_response(expire=3600, key_prefix="leagues")
 async def get_leagues(service: MatchService = Depends(get_match_service)):
     """Sistemde aktif verisi bulunan ligleri listeler."""
     return await service.get_available_leagues(sport="football")

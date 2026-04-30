@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { CheckIcon } from "@heroicons/react/24/solid";
+import { API_URL } from "@/config/constants";
 
 interface Plan {
   id: string;
@@ -18,7 +19,7 @@ export default function PricingPage() {
   useEffect(() => {
     const fetchPlans = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8000/api/v1/billing/plans");
+        const res = await fetch(`${API_URL}/api/v1/billing/plans`);
         if (res.ok) {
           const data = await res.json();
           setPlans(data);
@@ -35,19 +36,23 @@ export default function PricingPage() {
   const handleCheckout = async (planId: string) => {
     setProcessingId(planId);
     try {
-      const token = localStorage.getItem("token");
-      if (!token) {
+      // Auth check via cookies (Faz 1)
+      const authRes = await fetch(`${API_URL}/api/v1/auth/me`, {
+        credentials: "include"
+      });
+      
+      if (!authRes.ok) {
         // Redirect to register with plan_id
         window.location.href = `/register?plan=${planId}`;
         return;
       }
 
-      const res = await fetch("http://127.0.0.1:8000/api/v1/billing/checkout", {
+      const res = await fetch(`${API_URL}/api/v1/billing/checkout`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
+        credentials: "include",
         body: JSON.stringify({ plan_id: planId }),
       });
 

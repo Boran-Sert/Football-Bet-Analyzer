@@ -9,11 +9,9 @@ from typing import Callable
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.background import BackgroundTask
 
-from core.database import mongo
-from repositories.analytics_repository import AnalyticsRepository
 from schemas.analytics import RequestLog
+from core.logger import logger
 
 
 class TelemetryMiddleware(BaseHTTPMiddleware):
@@ -48,11 +46,12 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
             ip_address = request.client.host if request.client else ""
             user_agent = request.headers.get("user-agent", "")
 
-            # Kullanici bilgisi (eger auth middleware tarafindan eklenmisse)
+            # Kullanici bilgisini al
             user_id = getattr(request.state, "user_id", None)
 
+            # Log verisini hazirla
             log_data = RequestLog(
-                user_id=user_id,
+                user_id=str(user_id) if user_id else None,
                 method=method,
                 endpoint=endpoint,
                 status_code=status_code,
@@ -61,29 +60,10 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
                 user_agent=user_agent
             )
 
-            # Eger response nesnesi varsa, arka plan gorevi ekle.
-            # Yoksa (exception olduysa), manuel calistiracagiz (fire-and-forget).
-            if 'response' in locals() and hasattr(response, "background") and response.background is not None:
-                # Eger mevcut bir background task varsa, bizimkini de calistirmak icin 
-                # manuel eklemek daha saglikli.
-                pass
-            
-            # Repoyu olusturup asenkron background gorevi olarak atayalim
-            # Fastapi'de background tasklari dogrudan router'da eklenir ama middleware icinde
-            # starlette'in yapisindan faydalanarak ekleyebiliriz.
-            
-            async def write_log(data: RequestLog):
-                try:
-                    db = mongo.get_db()
-                    repo = AnalyticsRepository(db)
-                    await repo.insert_log(data)
-                except Exception:
-                    pass # Loglamada hata olursa gormezden gel
-
-            if 'response' in locals() and isinstance(response, Response):
-                # Mevcut task'i ezip kendi task'imizi (birden fazla eklenebilir hale) getiriyoruz
-                # starlette.background.BackgroundTasks ile birden fazla task eklenebilir
-                # Ancak burada basitce tek bir task ekliyoruz
-                response.background = BackgroundTask(write_log, log_data)
+            # JSON formatinda stdout'a logla (Faz 2: Centralized Logging)
+            logger.info(
+                f"API Request: {method} {endpoint} {status_code}",
+                extra={"extra_fields": log_data.model_dump()}
+            )
         
         return response

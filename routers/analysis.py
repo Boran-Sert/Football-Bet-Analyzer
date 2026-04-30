@@ -6,11 +6,13 @@ from middleware.rate_limiter import RateLimiter
 from schemas.auth import UserInDB
 from services.analysis_service import AnalysisService
 from utils.dependencies import get_analysis_service, get_current_active_user
+from utils.cache import cache_response
 
 router = APIRouter(prefix="/api/v1/football/analysis", tags=["Football Analysis"])
 
 
 @router.get("/similar/{match_id}", dependencies=[Depends(RateLimiter())])
+@cache_response(expire=600, key_prefix="analysis")
 async def get_similar_matches(
     match_id: str,
     limit: int | None = Query(None, ge=1, le=20, description="PRO/ELITE kullanicilar icin ozel limit belirleme"),

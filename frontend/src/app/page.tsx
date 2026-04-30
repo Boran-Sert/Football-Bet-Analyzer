@@ -7,6 +7,7 @@ import UpcomingMatchesTable from "@/components/UpcomingMatchesTable";
 import HistoricalAnalysis from "@/components/HistoricalAnalysis";
 import SimilarMatchesTable from "@/components/SimilarMatchesTable";
 import SummaryStats from "@/components/SummaryStats";
+import { API_URL } from "@/config/constants";
 
 export default function Home() {
   const [matches, setMatches] = useState<MatchResponse[]>([]);
@@ -22,46 +23,61 @@ export default function Home() {
 
   // Fetch upcoming matches
   useEffect(() => {
-    const fetchMatches = async () => {
-      setLoading(true);
-      setSelectedMatch(null);
-      setSimilarMatches([]);
+    const fetchMatches = async (isSilent = false) => {
+      if (!isSilent) {
+        setLoading(true);
+        setSelectedMatch(null);
+        setSimilarMatches([]);
+      }
+      
       try {
         const url = selectedLeague
-          ? `http://127.0.0.1:8000/api/v1/football/matches/?league=${selectedLeague}`
-          : `http://127.0.0.1:8000/api/v1/football/matches/`;
+          ? `${API_URL}/api/v1/football/matches/?league=${selectedLeague}`
+          : `${API_URL}/api/v1/football/matches/`;
 
         const response = await fetch(url);
         if (!response.ok) throw new Error("Backend unreachable");
 
         const json = await response.json();
-
-        if (json && Array.isArray(json.data)) {
-          setMatches(json.data);
-        } else if (Array.isArray(json)) {
-          setMatches(json);
-        } else {
-          setMatches([]);
-        }
+        const data = json?.data || (Array.isArray(json) ? json : []);
+        setMatches(data);
       } catch (error) {
         console.error("Fetch error:", error);
-        setMatches([]);
       } finally {
-        setLoading(false);
+        if (!isSilent) setLoading(false);
       }
     };
 
+    // Initial fetch
     fetchMatches();
+
+    // Setup polling (every 2 minutes) with Visibility API check (Faz 5 Fix)
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchMatches(true);
+      }
+    }, 120000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchMatches(true);
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [selectedLeague]);
 
   // Fetch User Tier
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        const token = localStorage.getItem("token");
-        if (!token) return;
-        const res = await fetch("http://127.0.0.1:8000/api/v1/auth/me", {
-          headers: { "Authorization": `Bearer ${token}` }
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
         });
         if (res.ok) {
           const data = await res.json();
@@ -69,9 +85,7 @@ export default function Home() {
           if (data.tier === "elite") setLimit(20);
           if (data.tier === "pro") setLimit(10);
           if (data.tier === "standard") setLimit(3);
-        } else if (res.status === 401) {
-          // Token expired or invalid, clear it
-          localStorage.removeItem("token");
+        } else {
           setUserTier("standard");
           setLimit(3);
         }
@@ -99,18 +113,8 @@ export default function Home() {
     if (!selectedMatch) return;
     setLoadingAnalysis(true);
     try {
-      const token = localStorage.getItem("token");
-      if (!token) {
-        throw new Error("Lütfen önce giriş yapın.");
-      }
-      
-      const headers: HeadersInit = { 
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`
-      };
-
-      const res = await fetch(`http://127.0.0.1:8000/api/v1/football/analysis/similar/${selectedMatch.external_id}?limit=${limit}`, {
-        headers,
+      const res = await fetch(`${API_URL}/api/v1/football/analysis/similar/${selectedMatch.external_id}?limit=${limit}`, {
+        credentials: "include",
       });
 
       const data = await res.json();

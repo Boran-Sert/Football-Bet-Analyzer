@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { API_URL } from "@/config/constants";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -16,14 +17,14 @@ export default function Login() {
     setError("");
     setLoading(true);
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/v1/auth/login", {
+      const response = await fetch(`${API_URL}/api/v1/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email, password: password }),
+        credentials: "include",
       });
       const data = await response.json();
       if (response.ok) {
-        localStorage.setItem("token", data.access_token);
         window.dispatchEvent(new Event('auth-change'));
         router.push("/");
       } else {

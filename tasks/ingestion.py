@@ -22,6 +22,7 @@ from clients.odds_api_client import OddsAPIClient
 from core.config import settings
 from core.database import mongo
 from core.redis_client import redis_manager
+from utils.lock import distributed_lock
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +40,11 @@ SKIP_IF_FRESH_HOURS = 4
 # ═══════════════════════════════════════════════
 
 
+@distributed_lock("lock:ingestion:upcoming", timeout=900)
 async def fetch_upcoming_matches() -> None:
-    """Zamanlanmis cron job: Yaklasan maclarin oranlarini ceker.
-
-    Sadece TARGET_LEAGUES icindeki ligler icin calisir.
-    Zaten guncel olan maclar atlanir (kota optimizasyonu).
-    17:00 ve 21:00 TR saatlerinde otomatik tetiklenir.
-    """
-    redis = redis_manager.get_client()
-    lock = redis.lock("lock:ingestion:upcoming", timeout=600, blocking_timeout=1)
-    
-    acquired = await lock.acquire()
-    if not acquired:
-        logger.info("Ingestion gorevi baska bir worker tarafindan calistiriliyor. Atlaniyor.")
-        return
-
+    """The Odds API'den yaklasan maclari ceker ve DB'ye yazar (Dagitik kilit ile)."""
     try:
-        logger.info("═══ YAKLASAN MAC GUNCELLEME BASLADI ═══")
+        logger.info("═══ YAKLASAN MACLARI CEKME BASLADI ═══")
 
         adapter = ADAPTERS.get("football")
         if not adapter:
@@ -87,11 +76,9 @@ async def fetch_upcoming_matches() -> None:
             "═══ GUNCELLEME TAMAMLANDI: %d yeni, %d atlandi ═══",
             total_new, total_skipped,
         )
-    finally:
-        try:
-            await lock.release()
-        except Exception:
-            pass
+    except Exception as exc:
+        logger.error("Ingestion genel hatasi: %s", exc)
+        raise
 
 
 async def _fetch_league(
@@ -162,12 +149,17 @@ async def _upsert_to_db(entities: list) -> None:
     db = mongo.get_db()
     operations = []
 
-    for entity in entities:
-        doc = entity.model_dump()
+    def _get_docs(entities_list):
+        return [e.model_dump() for e in entities_list]
+
+    # Faz 6 Fix: Pydantic model_dump (CPU-intensive) thread'e alindi
+    docs = await asyncio.to_thread(_get_docs, entities)
+
+    for i, entity in enumerate(entities):
         operations.append(
             UpdateOne(
                 {"external_id": entity.external_id},
-                {"$set": doc},
+                {"$set": docs[i]},
                 upsert=True,
             )
         )
@@ -201,23 +193,13 @@ async def _invalidate_cache(sport_name: str) -> None:
 # ═══════════════════════════════════════════════
 
 
+@distributed_lock("lock:ingestion:seed_historical", timeout=1800)
 async def seed_historical_data() -> None:
-    """data/ klasorundeki CSV dosyalarini MongoDB'ye yukler.
-
-    Sadece henuz yuklenmemis verileri ekler (upsert).
-    Uygulama basladiginda otomatik calisir.
-    Manuel olarak da load_local.py ile tetiklenebilir.
-    """
+    """data/ klasorundeki CSV dosyalarini MongoDB'ye yukler."""
     import csv as csv_module
-
-    redis = redis_manager.get_client()
-    lock = redis.lock("lock:ingestion:seed_historical", timeout=600, blocking_timeout=1)
+    import aiofiles
+    import io
     
-    acquired = await lock.acquire()
-    if not acquired:
-        logger.info("Tarihsel veri yukleme gorevi zaten calisiyor. Atlaniyor.")
-        return
-
     try:
         logger.info("═══ TARIHSEL VERI YUKLEME BASLADI ═══")
 
@@ -240,9 +222,15 @@ async def seed_historical_data() -> None:
             league_code = filename.split("_")[0].split(".")[0]
 
             try:
-                with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
-                    reader = csv_module.DictReader(f)
-                    rows = list(reader)
+                # Faz 6 Fix: Asenkron dosya okuma ve Senkron parsing thread'e alindi
+                async with aiofiles.open(csv_path, mode="r", encoding="utf-8", errors="ignore") as f:
+                    content = await f.read()
+                
+                def _parse_csv(data: str):
+                    reader = csv_module.DictReader(io.StringIO(data))
+                    return list(reader)
+                
+                rows = await asyncio.to_thread(_parse_csv, content)
 
                 if not rows:
                     continue
@@ -259,8 +247,6 @@ async def seed_historical_data() -> None:
         # Cache temizle
         await _invalidate_cache("football")
         logger.info("═══ TARIHSEL VERI YUKLEME TAMAMLANDI: %d mac ═══", total_count)
-    finally:
-        try:
-            await lock.release()
-        except Exception:
-            pass
+    except Exception as exc:
+        logger.error("Tarihsel veri yukleme hatasi: %s", exc)
+        raise

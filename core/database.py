@@ -21,7 +21,10 @@ class MongoManager:
 
     async def connect(self) -> None:
         """Baglanti kur ve indeksleri olustur."""
-        self._client = AsyncIOMotorClient(settings.MONGO_URI, tlsAllowInvalidCertificates=True)
+        self._client = AsyncIOMotorClient(
+            settings.MONGO_URI, 
+            tlsAllowInvalidCertificates=settings.MONGO_TLS_SKIP_VERIFY
+        )
         self._db = self._client.get_default_database()
 
         # Baglanti testi
@@ -41,6 +44,14 @@ class MongoManager:
         await db.matches.create_index("odds.h2h.home")
         await db.matches.create_index("odds.h2h.draw")
         await db.matches.create_index("odds.h2h.away")
+        await db.matches.create_index("league_key")
+        
+        # Benzerlik aramasi (Similarity Search) icin bilesik indeks
+        await db.matches.create_index([
+            ("odds.h2h.home", 1),
+            ("odds.h2h.draw", 1),
+            ("odds.h2h.away", 1)
+        ])
         
         await db.matches.create_index([
             ("sport", 1),

@@ -3,15 +3,22 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { API_URL } from "@/config/constants";
 
 export default function Navbar() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
-    const checkToken = () => {
-      const token = localStorage.getItem("token");
-      setIsLoggedIn(!!token);
+    const checkToken = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
+        });
+        setIsLoggedIn(res.ok);
+      } catch (err) {
+        setIsLoggedIn(false);
+      }
     };
 
     // Initial check
@@ -24,8 +31,16 @@ export default function Navbar() {
     return () => window.removeEventListener("auth-change", checkToken);
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem("token");
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_URL}/api/v1/auth/logout`, { 
+        method: "POST",
+        credentials: "include"
+      });
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
+    setIsLoggedIn(false);
     window.dispatchEvent(new Event('auth-change'));
     router.push("/login");
   };

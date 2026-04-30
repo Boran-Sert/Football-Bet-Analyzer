@@ -9,6 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from core.database import mongo
 from core.redis_client import redis_manager
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+from middleware.security import SecurityHeadersMiddleware
 from middleware.telemetry import TelemetryMiddleware
 from routers.admin import router as admin_router
 from routers.analysis import router as analysis_router
@@ -16,13 +18,13 @@ from routers.auth import router as auth_router
 from routers.billing import router as billing_router        # ← GAP 4: Stripe
 from routers.matches import router as matches_router
 from tasks.scheduler import scheduler, configure_scheduler
-from utils.exceptions import AppException, app_exception_handler, global_exception_handler
+from fastapi.exceptions import RequestValidationError
+from prometheus_fastapi_instrumentator import Instrumentator
+from utils.exceptions import AppException, app_exception_handler, global_exception_handler, validation_exception_handler
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-)
-logger = logging.getLogger(__name__)
+from core.logger import logger
+
+# setup_logging() is already called on import in core.logger
 
 
 @asynccontextmanager
@@ -60,9 +62,11 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],             # Wildcard kaldirildi
 )
 
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TelemetryMiddleware)
-
 app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
 
 app.include_router(auth_router)
@@ -70,7 +74,13 @@ app.include_router(admin_router)
 app.include_router(matches_router)
 app.include_router(analysis_router)
 app.include_router(billing_router)   # ← GAP 4
+app.include_router(admin_router)
 
+# Prometheus Metrikleri (Faz 3)
+Instrumentator().instrument(app).expose(app)
+
+
+from fastapi.responses import JSONResponse
 
 @app.get("/health")
 async def health_check():
@@ -93,4 +103,8 @@ async def health_check():
         health["status"] = "degraded"
 
     health["components"]["scheduler"] = "running" if scheduler.running else "stopped"
+    
+    if health["status"] == "degraded":
+        return JSONResponse(content=health, status_code=503)
+        
     return health

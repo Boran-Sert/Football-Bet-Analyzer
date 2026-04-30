@@ -7,8 +7,10 @@ standart MatchEntity formatina donusturur.
 import hashlib
 import logging
 from datetime import datetime
+from typing import Any
 
 from adapters.base_adapter import SportAdapter
+from adapters.parsers.csv_parsers import CSVParserStrategy, CSVParserFactory
 from adapters.name_mapping import (
     LEAGUE_CODE_TO_API_KEY,
     LEAGUE_TITLES,
@@ -139,6 +141,10 @@ class FootballAdapter(SportAdapter):
     #  CSV → MatchEntity
     # ══════════════════════════════════════════
 
+    # ══════════════════════════════════════════
+    #  CSV → MatchEntity
+    # ══════════════════════════════════════════
+
     def normalize_historical(
         self, raw_rows: list[dict], league_code: str = ""
     ) -> list[MatchEntity]:
@@ -146,9 +152,19 @@ class FootballAdapter(SportAdapter):
         entities: list[MatchEntity] = []
         league_key = LEAGUE_CODE_TO_API_KEY.get(league_code, f"csv_{league_code}")
 
+        # Strategy Selection (Faz 6 Fix: Strategy-Factory Pattern ile dinamik secim)
+        if not raw_rows:
+            return []
+            
+        try:
+            parser = CSVParserFactory.get_parser(raw_rows[0])
+        except ValueError as exc:
+            logger.error(f"Parser secim hatasi: {exc}")
+            return []
+
         for row in raw_rows:
             try:
-                entity = self._parse_csv_row(row, league_key, league_code)
+                entity = self._parse_csv_row(row, league_key, league_code, parser)
                 if entity:
                     entities.append(entity)
             except Exception as exc:
@@ -158,13 +174,12 @@ class FootballAdapter(SportAdapter):
         return entities
 
     def _parse_csv_row(
-        self, row: dict, league_key: str, league_code: str
+        self, row: dict, league_key: str, league_code: str, parser: CSVParserStrategy
     ) -> MatchEntity | None:
         """Tek bir CSV satirini MatchEntity'ye donusturur."""
-        # TURKCE ve INGILIZCE header destegi (GUNCEL)
-        date_str = row.get("Tarih") or row.get("Date") or ""
-        home = row.get("Ev Sahibi") or row.get("HomeTeam") or ""
-        away = row.get("Deplasman") or row.get("AwayTeam") or ""
+        date_str = parser.get_date(row)
+        home = parser.get_home_team(row)
+        away = parser.get_away_team(row)
 
         if not date_str or not home or not away:
             return None
@@ -173,14 +188,30 @@ class FootballAdapter(SportAdapter):
         if not commence_time:
             return None
 
-        # Normalize date for ID generation (YYYY-MM-DD)
         norm_date = commence_time.strftime("%Y-%m-%d")
         raw_id = f"{league_code}_{norm_date}_{home}_{away}"
         external_id = hashlib.md5(raw_id.encode()).hexdigest()
 
-        # Oranlar ve Metrikler
-        odds = self._extract_csv_odds(row)
-        metrics = self._extract_csv_metrics(row)
+        # Oranlar ve Metrikler (Strategy üzerinden)
+        odds = {}
+        h2h = parser.get_h2h_odds(row)
+        if h2h:
+            odds["h2h"] = {"home": h2h[0], "draw": h2h[1], "away": h2h[2]}
+            
+        totals = parser.get_totals_odds(row)
+        if totals:
+            odds["totals"] = {"over_2_5": totals[0], "under_2_5": totals[1]}
+
+        metrics = {}
+        goals = parser.get_goals(row)
+        if goals:
+            metrics["home_goals"] = goals[0]
+            metrics["away_goals"] = goals[1]
+            metrics["total_goals"] = goals[0] + goals[1]
+
+        # Diger metrikler icin opsiyonel alanlar (Ingilizce formatta varsa)
+        if hasattr(parser, 'get_extra_metrics'):
+             metrics.update(parser.get_extra_metrics(row))
 
         return MatchEntity(
             external_id=external_id,
@@ -205,99 +236,6 @@ class FootballAdapter(SportAdapter):
             except ValueError:
                 continue
         return None
-
-    def _extract_csv_odds(self, row: dict) -> dict:
-        """CSV satirindan oran verilerini cikarir (Turkce destekli)."""
-        odds: dict = {}
-
-        # h2h (Turkce: MS 1, MS 0, MS 2 | Ingilizce: B365H, PSH)
-        h = self._safe_float(row.get("MS 1") or row.get("B365H") or row.get("PSH", ""))
-        dr = self._safe_float(row.get("MS 0") or row.get("B365D") or row.get("PSD", ""))
-        a = self._safe_float(row.get("MS 2") or row.get("B365A") or row.get("PSA", ""))
-
-        if h and dr and a:
-            odds["h2h"] = {"home": h, "draw": dr, "away": a}
-
-        # totals (Turkce: 2.5 Ust, 2.5 Alt | Ingilizce: B365>2.5, P>2.5)
-        over = self._safe_float(
-            row.get("2.5 Ust") or row.get("B365>2.5") or row.get("P>2.5", "")
-        )
-        under = self._safe_float(
-            row.get("2.5 Alt") or row.get("B365<2.5") or row.get("P<2.5", "")
-        )
-
-        if over and under:
-            odds["totals"] = {"over_2_5": over, "under_2_5": under}
-
-        return odds
-
-    def _extract_csv_metrics(self, row: dict) -> dict:
-        """CSV satirindan istatistik verilerini cikarir (Turkce destekli)."""
-        metrics: dict = {}
-
-        # Goller (Turkce: Ev Sahibi Gol, Deplasman Gol | Ingilizce: FTHG, FTAG)
-        hg = self._safe_int(row.get("Ev Sahibi Gol") or row.get("FTHG", ""))
-        ag = self._safe_int(row.get("Deplasman Gol") or row.get("FTAG", ""))
-        if hg is not None and ag is not None:
-            metrics["home_goals"] = hg
-            metrics["away_goals"] = ag
-            metrics["total_goals"] = hg + ag
-
-        # İlk Yarı Golleri (Turkce: HTHG, HTAG)
-        hthg = self._safe_int(row.get("HTHG", ""))
-        htag = self._safe_int(row.get("HTAG", ""))
-        if hthg is not None:
-            metrics["home_ht_goals"] = hthg
-        if htag is not None:
-            metrics["away_ht_goals"] = htag
-
-        # Kartlar (Turkce: Sari Kart, Kirmizi Kart | Ingilizce: HY, AY, HR, AR)
-        hy = self._safe_int(row.get("Ev Sahibi Sari Kart") or row.get("HY", ""))
-        ay = self._safe_int(row.get("Deplasman Sari Kart") or row.get("AY", ""))
-        hr = self._safe_int(row.get("Ev Sahibi Kirmizi Kart") or row.get("HR", ""))
-        ar = self._safe_int(row.get("Deplasman Kirmizi Kart") or row.get("AR", ""))
-
-        if hy is not None and ay is not None:
-            metrics["home_yellow"] = hy
-            metrics["away_yellow"] = ay
-            metrics["total_yellow"] = hy + ay
-        if hr is not None and ar is not None:
-            metrics["home_red"] = hr
-            metrics["away_red"] = ar
-            metrics["total_red"] = hr + ar
-
-        # Kornerler (Turkce: Korner | Ingilizce: HC, AC)
-        hc = self._safe_int(row.get("Ev Sahibi Korner") or row.get("HC", ""))
-        ac = self._safe_int(row.get("Deplasman Korner") or row.get("AC", ""))
-        if hc is not None and ac is not None:
-            metrics["home_corners"] = hc
-            metrics["away_corners"] = ac
-            metrics["total_corners"] = hc + ac
-
-        # Sutlar (Ingilizce: HS, AS, HST, AST)
-        hs = self._safe_int(row.get("HS", ""))
-        as_ = self._safe_int(row.get("AS", ""))
-        if hs is not None and as_ is not None:
-            metrics["home_shots"] = hs
-            metrics["away_shots"] = as_
-            metrics["total_shots"] = hs + as_
-
-        hst = self._safe_int(row.get("HST", ""))
-        ast = self._safe_int(row.get("AST", ""))
-        if hst is not None and ast is not None:
-            metrics["home_shots_on_target"] = hst
-            metrics["away_shots_on_target"] = ast
-            metrics["total_shots_on_target"] = hst + ast
-
-        # Fauller (Ingilizce: HF, AF)
-        hf = self._safe_int(row.get("HF", ""))
-        af = self._safe_int(row.get("AF", ""))
-        if hf is not None and af is not None:
-            metrics["home_fouls"] = hf
-            metrics["away_fouls"] = af
-            metrics["total_fouls"] = hf + af
-
-        return metrics
 
     @staticmethod
     def _safe_float(val: str) -> float | None:

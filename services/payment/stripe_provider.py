@@ -26,8 +26,7 @@ class StripeProvider(BasePaymentProvider):
             raise ValueError(f"Gecersiz plan: {plan_id}")
 
         # Stripe USD kullaniyor varsayiyoruz
-        session = await asyncio.to_thread(
-            stripe.checkout.Session.create,
+        session = await stripe.checkout.Session.create_async(
             payment_method_types=["card"],
             mode="payment", # Abonelik yerine tek seferlik odeme (basitlik icin)
             customer_email=user_email,

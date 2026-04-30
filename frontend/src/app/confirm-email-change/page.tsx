@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { API_URL } from "@/config/constants";
 
 export default function ConfirmEmailChangePage() {
   const searchParams = useSearchParams();
@@ -20,14 +21,16 @@ export default function ConfirmEmailChangePage() {
 
     const confirmChange = async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:8000/api/v1/auth/confirm-email-change?token=${token}`);
+        const res = await fetch(`${API_URL}/api/v1/auth/confirm-email-change?token=${token}`, {
+          credentials: "include"
+        });
         const data = await res.json();
         
         if (res.ok) {
           setStatus('success');
           setMessage("Email adresiniz başarıyla güncellendi. Lütfen yeni e-posta adresinizle giriş yapın.");
-          // Clear old token since email changed
-          localStorage.removeItem("token");
+          // Clear cookies by calling logout (Faz 1)
+          await fetch(`${API_URL}/api/v1/auth/logout`, { method: "POST", credentials: "include" });
           window.dispatchEvent(new Event('auth-change'));
         } else {
           setStatus('error');

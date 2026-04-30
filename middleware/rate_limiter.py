@@ -13,6 +13,7 @@ Yeni yaklasim (Sliding Window — Redis Sorted Set):
 """
 
 import time
+import uuid
 
 from fastapi import Request, HTTPException
 from core.config import TierLimits
@@ -38,18 +39,15 @@ class RateLimiter:
         user_tier = getattr(request.state, "user_tier", UserTier.STANDARD.value)
         user_id = getattr(request.state, "user_id", None)
 
-        # Identifier: giris yapildiysa user_id, yapilmadiysa gercek IP
+        # Identifier: giris yapildiysa user_id, yapilmadiysa IP
         if user_id:
             identifier = f"user:{user_id}"
         else:
-            x_forwarded_for = request.headers.get("x-forwarded-for")
-            if x_forwarded_for:
-                identifier = x_forwarded_for.split(",")[0].strip()
-            else:
-                identifier = request.headers.get(
-                    "x-real-ip",
-                    request.client.host if request.client else "unknown_ip",
-                )
+            # Faz 6 Fix: Rate Limiter Spoofing Engellendi.
+            # X-Forwarded-For basligina uygulama katmaninda guvenilmez (spoofing riski).
+            # En saglikli yol, Load Balancer arkasinda "ProxyHeadersMiddleware" (Uvicorn)
+            # kullanmaktir. Boylece request.client.host LB tarafindan dogrulanmis IP olur.
+            identifier = request.client.host if request.client else "unknown_ip"
 
         # Limit: init'te override varsa o kullanilir, yoksa tier'dan gelir
         limit = self.rpm if self.rpm is not None else TierLimits.get_rate_limit(user_tier)
@@ -66,7 +64,8 @@ class RateLimiter:
             # Pipeline: eski kayitlari temizle → yeni kaydi ekle → say → TTL ayarla
             async with redis.pipeline(transaction=True) as pipe:
                 pipe.zremrangebyscore(redis_key, "-inf", window_start)
-                pipe.zadd(redis_key, {str(now): now})
+                # Faz 6 Fix: Member unique olmali (uuid eklendi)
+                pipe.zadd(redis_key, {f"{now}:{uuid.uuid4().hex}": now})
                 pipe.zcard(redis_key)
                 pipe.expire(redis_key, 60)
                 results = await pipe.execute()
@@ -82,5 +81,8 @@ class RateLimiter:
         except HTTPException:
             raise
         except Exception:
-            # Redis arizi durumunda istege izin ver (fail-open)
-            pass
+            # Redis arizasi durumunda guvenlik icin istegi reddet (fail-closed) - Faz 1
+            raise HTTPException(
+                status_code=503,
+                detail="Rate limiter servisi su an kullanilamiyor. Lutfen daha sonra tekrar deneyin."
+            )

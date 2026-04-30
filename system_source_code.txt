@@ -1,16 +1,24 @@
 KLASÖR AĞACI
 ============
   .gitignore
+  docker-compose.yml
+  Dockerfile
   main.py
+  pyproject.toml
   pytest.ini
   README.md
   requirements.txt
   rules.md
+.github/
+  workflows/
+    main.yml
 adapters/
   base_adapter.py
   football_adapter.py
   name_mapping.py
   __init__.py
+  parsers/
+    csv_parsers.py
 clients/
   base_client.py
   email_client.py
@@ -20,10 +28,12 @@ clients/
 core/
   config.py
   database.py
+  logger.py
   pricing.py
   redis_client.py
   __init__.py
 frontend/
+  .env.local
   CLAUDE.md
   eslint.config.mjs
   next.config.ts
@@ -65,10 +75,13 @@ frontend/
       SummaryStats.tsx
       TopHeader.tsx
       UpcomingMatchesTable.tsx
+    config/
+      constants.ts
     types/
       index.ts
 middleware/
   rate_limiter.py
+  security.py
   telemetry.py
   __init__.py
 repositories/
@@ -97,6 +110,7 @@ services/
   __init__.py
   payment/
     base.py
+    factory.py
     iyzico_provider.py
     stripe_provider.py
 tasks/
@@ -115,6 +129,7 @@ utils/
   cache.py
   dependencies.py
   exceptions.py
+  lock.py
   __init__.py
 
 ==================================================
@@ -182,6 +197,109 @@ yarn-error.log*
 next-env.d.ts
 
 
+--- DOSYA: docker-compose.yml ---
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    container_name: football_saas_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - MONGO_URI=mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/football_saas?authSource=admin
+      - REDIS_URL=redis://redis:6379/0
+      - ENVIRONMENT=production
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - saas_network
+
+  mongodb:
+    image: mongo:latest
+    container_name: football_saas_mongodb
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - saas_network
+
+  redis:
+    image: redis:alpine
+    container_name: football_saas_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - saas_network
+
+networks:
+  saas_network:
+    driver: bridge
+
+volumes:
+  mongo_data:
+  redis_data:
+
+
+--- DOSYA: Dockerfile ---
+# Multi-stage build for production
+FROM python:3.11-slim as builder
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install poetry
+RUN curl -sSL https://install.python-poetry.org | python3 -
+ENV PATH="/root/.local/bin:$PATH"
+
+# Copy project files
+COPY pyproject.toml poetry.lock* ./
+
+# Install dependencies (without dev)
+RUN poetry config virtualenvs.create false \
+    && poetry install --no-interaction --no-ansi --no-root --without dev
+
+# Final stage
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application code
+COPY . .
+
+# Create a non-privileged user to run the app
+RUN adduser --disabled-password --gecos '' appuser
+USER appuser
+
+# Expose port
+EXPOSE 8000
+
+# Run the application with Gunicorn for production (Multi-process)
+CMD ["gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+
+
 --- DOSYA: main.py ---
 """FastAPI uygulama giris noktasi — billing router eklendi (GAP 4)."""
 
@@ -194,6 +312,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from core.database import mongo
 from core.redis_client import redis_manager
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+from middleware.security import SecurityHeadersMiddleware
 from middleware.telemetry import TelemetryMiddleware
 from routers.admin import router as admin_router
 from routers.analysis import router as analysis_router
@@ -201,13 +321,13 @@ from routers.auth import router as auth_router
 from routers.billing import router as billing_router        # ← GAP 4: Stripe
 from routers.matches import router as matches_router
 from tasks.scheduler import scheduler, configure_scheduler
-from utils.exceptions import AppException, app_exception_handler, global_exception_handler
+from fastapi.exceptions import RequestValidationError
+from prometheus_fastapi_instrumentator import Instrumentator
+from utils.exceptions import AppException, app_exception_handler, global_exception_handler, validation_exception_handler
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-)
-logger = logging.getLogger(__name__)
+from core.logger import logger
+
+# setup_logging() is already called on import in core.logger
 
 
 @asynccontextmanager
@@ -245,9 +365,11 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],             # Wildcard kaldirildi
 )
 
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TelemetryMiddleware)
-
 app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
 
 app.include_router(auth_router)
@@ -255,7 +377,13 @@ app.include_router(admin_router)
 app.include_router(matches_router)
 app.include_router(analysis_router)
 app.include_router(billing_router)   # ← GAP 4
+app.include_router(admin_router)
 
+# Prometheus Metrikleri (Faz 3)
+Instrumentator().instrument(app).expose(app)
+
+
+from fastapi.responses import JSONResponse
 
 @app.get("/health")
 async def health_check():
@@ -278,7 +406,49 @@ async def health_check():
         health["status"] = "degraded"
 
     health["components"]["scheduler"] = "running" if scheduler.running else "stopped"
+    
+    if health["status"] == "degraded":
+        return JSONResponse(content=health, status_code=503)
+        
     return health
+
+
+--- DOSYA: pyproject.toml ---
+[tool.poetry]
+name = "football-bet-analyzer"
+version = "0.3.0"
+description = "Canli oran analiz sistemi backend servisi."
+authors = ["Boran Sert"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.110.0"
+uvicorn = {extras = ["standard"], version = "^0.29.0"}
+motor = "^3.3.2"
+redis = "^5.0.3"
+pydantic-settings = "^2.2.1"
+pydantic = {extras = ["email"], version = "^2.6.4"}
+apscheduler = "^3.10.4"
+httpx = "^0.27.0"
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+bcrypt = "3.1.7"
+python-multipart = "^0.0.9"
+orjson = "^3.9.15"
+aiofiles = "^23.2.1"
+PyJWT = "^2.8.0"
+stripe = "^8.5.0"
+iyzipay = "^1.0.43"
+prometheus-fastapi-instrumentator = "^7.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.1.1"
+pytest-asyncio = "^0.23.6"
+pytest-mock = "^3.14.0"
+ruff = "^0.3.4"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
 
 
 --- DOSYA: pytest.ini ---
@@ -376,7 +546,6 @@ apscheduler
 httpx
 passlib
 bcrypt==3.1.7
-python-jose[cryptography]
 python-multipart
 orjson
 aiofiles
@@ -417,6 +586,65 @@ Projeye eklenen her kod aşağıdaki klasör sınırlarına uymak zorundadır:
 - **Rate Limiting:** `routers/` katmanındaki tüm açık endpointlerde Redis tabanlı IP sınırlandırması olacaktır.
 - **Exception Handling:** Ham veritabanı hataları veya Python Traceback'leri asla kullanıcıya (frontend'e) dönülmeyecektir. Her zaman standart HTTP HTTPException (400, 404, 500) formatında, temiz JSON dönülecektir.
 - Çevresel değişkenler (ENV) `core/config.py` içinde Pydantic `BaseSettings` ile doğrulanacaktır.
+
+--- DOSYA: .github\workflows\main.yml ---
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Load cached venv
+        id: cached-poetry-dependencies
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install dependencies
+        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+        run: poetry install --no-interaction --no-root
+
+      - name: Run Linting (Ruff)
+        run: poetry run ruff check .
+
+      - name: Run Tests
+        env:
+          MONGO_URI: mongodb://localhost:27017/test_db
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET_KEY: test_secret_key
+          ODDS_API_KEY: test_key
+        run: poetry run pytest tests/
+
 
 --- DOSYA: adapters\base_adapter.py ---
 """Soyut spor adapter sinifi.
@@ -476,8 +704,10 @@ standart MatchEntity formatina donusturur.
 import hashlib
 import logging
 from datetime import datetime
+from typing import Any
 
 from adapters.base_adapter import SportAdapter
+from adapters.parsers.csv_parsers import CSVParserStrategy, CSVParserFactory
 from adapters.name_mapping import (
     LEAGUE_CODE_TO_API_KEY,
     LEAGUE_TITLES,
@@ -608,6 +838,10 @@ class FootballAdapter(SportAdapter):
     #  CSV → MatchEntity
     # ══════════════════════════════════════════
 
+    # ══════════════════════════════════════════
+    #  CSV → MatchEntity
+    # ══════════════════════════════════════════
+
     def normalize_historical(
         self, raw_rows: list[dict], league_code: str = ""
     ) -> list[MatchEntity]:
@@ -615,9 +849,19 @@ class FootballAdapter(SportAdapter):
         entities: list[MatchEntity] = []
         league_key = LEAGUE_CODE_TO_API_KEY.get(league_code, f"csv_{league_code}")
 
+        # Strategy Selection (Faz 6 Fix: Strategy-Factory Pattern ile dinamik secim)
+        if not raw_rows:
+            return []
+            
+        try:
+            parser = CSVParserFactory.get_parser(raw_rows[0])
+        except ValueError as exc:
+            logger.error(f"Parser secim hatasi: {exc}")
+            return []
+
         for row in raw_rows:
             try:
-                entity = self._parse_csv_row(row, league_key, league_code)
+                entity = self._parse_csv_row(row, league_key, league_code, parser)
                 if entity:
                     entities.append(entity)
             except Exception as exc:
@@ -627,13 +871,12 @@ class FootballAdapter(SportAdapter):
         return entities
 
     def _parse_csv_row(
-        self, row: dict, league_key: str, league_code: str
+        self, row: dict, league_key: str, league_code: str, parser: CSVParserStrategy
     ) -> MatchEntity | None:
         """Tek bir CSV satirini MatchEntity'ye donusturur."""
-        # TURKCE ve INGILIZCE header destegi (GUNCEL)
-        date_str = row.get("Tarih") or row.get("Date") or ""
-        home = row.get("Ev Sahibi") or row.get("HomeTeam") or ""
-        away = row.get("Deplasman") or row.get("AwayTeam") or ""
+        date_str = parser.get_date(row)
+        home = parser.get_home_team(row)
+        away = parser.get_away_team(row)
 
         if not date_str or not home or not away:
             return None
@@ -642,14 +885,30 @@ class FootballAdapter(SportAdapter):
         if not commence_time:
             return None
 
-        # Normalize date for ID generation (YYYY-MM-DD)
         norm_date = commence_time.strftime("%Y-%m-%d")
         raw_id = f"{league_code}_{norm_date}_{home}_{away}"
         external_id = hashlib.md5(raw_id.encode()).hexdigest()
 
-        # Oranlar ve Metrikler
-        odds = self._extract_csv_odds(row)
-        metrics = self._extract_csv_metrics(row)
+        # Oranlar ve Metrikler (Strategy üzerinden)
+        odds = {}
+        h2h = parser.get_h2h_odds(row)
+        if h2h:
+            odds["h2h"] = {"home": h2h[0], "draw": h2h[1], "away": h2h[2]}
+            
+        totals = parser.get_totals_odds(row)
+        if totals:
+            odds["totals"] = {"over_2_5": totals[0], "under_2_5": totals[1]}
+
+        metrics = {}
+        goals = parser.get_goals(row)
+        if goals:
+            metrics["home_goals"] = goals[0]
+            metrics["away_goals"] = goals[1]
+            metrics["total_goals"] = goals[0] + goals[1]
+
+        # Diger metrikler icin opsiyonel alanlar (Ingilizce formatta varsa)
+        if hasattr(parser, 'get_extra_metrics'):
+             metrics.update(parser.get_extra_metrics(row))
 
         return MatchEntity(
             external_id=external_id,
@@ -674,99 +933,6 @@ class FootballAdapter(SportAdapter):
             except ValueError:
                 continue
         return None
-
-    def _extract_csv_odds(self, row: dict) -> dict:
-        """CSV satirindan oran verilerini cikarir (Turkce destekli)."""
-        odds: dict = {}
-
-        # h2h (Turkce: MS 1, MS 0, MS 2 | Ingilizce: B365H, PSH)
-        h = self._safe_float(row.get("MS 1") or row.get("B365H") or row.get("PSH", ""))
-        dr = self._safe_float(row.get("MS 0") or row.get("B365D") or row.get("PSD", ""))
-        a = self._safe_float(row.get("MS 2") or row.get("B365A") or row.get("PSA", ""))
-
-        if h and dr and a:
-            odds["h2h"] = {"home": h, "draw": dr, "away": a}
-
-        # totals (Turkce: 2.5 Ust, 2.5 Alt | Ingilizce: B365>2.5, P>2.5)
-        over = self._safe_float(
-            row.get("2.5 Ust") or row.get("B365>2.5") or row.get("P>2.5", "")
-        )
-        under = self._safe_float(
-            row.get("2.5 Alt") or row.get("B365<2.5") or row.get("P<2.5", "")
-        )
-
-        if over and under:
-            odds["totals"] = {"over_2_5": over, "under_2_5": under}
-
-        return odds
-
-    def _extract_csv_metrics(self, row: dict) -> dict:
-        """CSV satirindan istatistik verilerini cikarir (Turkce destekli)."""
-        metrics: dict = {}
-
-        # Goller (Turkce: Ev Sahibi Gol, Deplasman Gol | Ingilizce: FTHG, FTAG)
-        hg = self._safe_int(row.get("Ev Sahibi Gol") or row.get("FTHG", ""))
-        ag = self._safe_int(row.get("Deplasman Gol") or row.get("FTAG", ""))
-        if hg is not None and ag is not None:
-            metrics["home_goals"] = hg
-            metrics["away_goals"] = ag
-            metrics["total_goals"] = hg + ag
-
-        # İlk Yarı Golleri (Turkce: HTHG, HTAG)
-        hthg = self._safe_int(row.get("HTHG", ""))
-        htag = self._safe_int(row.get("HTAG", ""))
-        if hthg is not None:
-            metrics["home_ht_goals"] = hthg
-        if htag is not None:
-            metrics["away_ht_goals"] = htag
-
-        # Kartlar (Turkce: Sari Kart, Kirmizi Kart | Ingilizce: HY, AY, HR, AR)
-        hy = self._safe_int(row.get("Ev Sahibi Sari Kart") or row.get("HY", ""))
-        ay = self._safe_int(row.get("Deplasman Sari Kart") or row.get("AY", ""))
-        hr = self._safe_int(row.get("Ev Sahibi Kirmizi Kart") or row.get("HR", ""))
-        ar = self._safe_int(row.get("Deplasman Kirmizi Kart") or row.get("AR", ""))
-
-        if hy is not None and ay is not None:
-            metrics["home_yellow"] = hy
-            metrics["away_yellow"] = ay
-            metrics["total_yellow"] = hy + ay
-        if hr is not None and ar is not None:
-            metrics["home_red"] = hr
-            metrics["away_red"] = ar
-            metrics["total_red"] = hr + ar
-
-        # Kornerler (Turkce: Korner | Ingilizce: HC, AC)
-        hc = self._safe_int(row.get("Ev Sahibi Korner") or row.get("HC", ""))
-        ac = self._safe_int(row.get("Deplasman Korner") or row.get("AC", ""))
-        if hc is not None and ac is not None:
-            metrics["home_corners"] = hc
-            metrics["away_corners"] = ac
-            metrics["total_corners"] = hc + ac
-
-        # Sutlar (Ingilizce: HS, AS, HST, AST)
-        hs = self._safe_int(row.get("HS", ""))
-        as_ = self._safe_int(row.get("AS", ""))
-        if hs is not None and as_ is not None:
-            metrics["home_shots"] = hs
-            metrics["away_shots"] = as_
-            metrics["total_shots"] = hs + as_
-
-        hst = self._safe_int(row.get("HST", ""))
-        ast = self._safe_int(row.get("AST", ""))
-        if hst is not None and ast is not None:
-            metrics["home_shots_on_target"] = hst
-            metrics["away_shots_on_target"] = ast
-            metrics["total_shots_on_target"] = hst + ast
-
-        # Fauller (Ingilizce: HF, AF)
-        hf = self._safe_int(row.get("HF", ""))
-        af = self._safe_int(row.get("AF", ""))
-        if hf is not None and af is not None:
-            metrics["home_fouls"] = hf
-            metrics["away_fouls"] = af
-            metrics["total_fouls"] = hf + af
-
-        return metrics
 
     @staticmethod
     def _safe_float(val: str) -> float | None:
@@ -944,6 +1110,140 @@ def normalize_team_name(raw_name: str) -> str:
 
 --- DOSYA: adapters\__init__.py ---
 # adapters package
+
+
+--- DOSYA: adapters\parsers\csv_parsers.py ---
+from abc import ABC, abstractmethod
+from typing import Any
+
+class CSVParserStrategy(ABC):
+    """CSV parserlar icin strateji arayuzu."""
+    
+    @staticmethod
+    @abstractmethod
+    def can_handle(first_row: dict) -> bool:
+        """Bu parser verilen satiri isleyebilir mi?"""
+        pass
+
+    @abstractmethod
+    def get_date(self, row: dict) -> str | None:
+        pass
+
+    @abstractmethod
+    def get_home_team(self, row: dict) -> str | None:
+        pass
+
+    @abstractmethod
+    def get_away_team(self, row: dict) -> str | None:
+        pass
+
+    @abstractmethod
+    def get_h2h_odds(self, row: dict) -> tuple[float, float, float] | None:
+        pass
+
+    @abstractmethod
+    def get_totals_odds(self, row: dict) -> tuple[float, float] | None:
+        pass
+
+    @abstractmethod
+    def get_goals(self, row: dict) -> tuple[int, int] | None:
+        pass
+
+class EnglishCSVParser(CSVParserStrategy):
+    """Football-data.co.uk standart Ingilizce formatı."""
+    
+    @staticmethod
+    def can_handle(first_row: dict) -> bool:
+        return "B365H" in first_row or "HomeTeam" in first_row
+
+    def get_date(self, row: dict) -> str | None:
+        return row.get("Date")
+
+    def get_home_team(self, row: dict) -> str | None:
+        return row.get("HomeTeam")
+
+    def get_away_team(self, row: dict) -> str | None:
+        return row.get("AwayTeam")
+
+    def get_h2h_odds(self, row: dict) -> tuple[float, float, float] | None:
+        h = row.get("B365H") or row.get("PSH")
+        d = row.get("B365D") or row.get("PSD")
+        a = row.get("B365A") or row.get("PSA")
+        try:
+            return float(h), float(d), float(a)
+        except (TypeError, ValueError):
+            return None
+
+    def get_totals_odds(self, row: dict) -> tuple[float, float] | None:
+        over = row.get("B365>2.5") or row.get("P>2.5")
+        under = row.get("B365<2.5") or row.get("P<2.5")
+        try:
+            return float(over), float(under)
+        except (TypeError, ValueError):
+            return None
+
+    def get_goals(self, row: dict) -> tuple[int, int] | None:
+        hg = row.get("FTHG")
+        ag = row.get("FTAG")
+        try:
+            return int(hg), int(ag)
+        except (TypeError, ValueError):
+            return None
+
+class TurkishCSVParser(CSVParserStrategy):
+    """Ozel Turkce baslikli CSV formatı."""
+    
+    @staticmethod
+    def can_handle(first_row: dict) -> bool:
+        return "MS 1" in first_row or "Ev Sahibi" in first_row
+
+    def get_date(self, row: dict) -> str | None:
+        return row.get("Tarih")
+
+    def get_home_team(self, row: dict) -> str | None:
+        return row.get("Ev Sahibi")
+
+    def get_away_team(self, row: dict) -> str | None:
+        return row.get("Deplasman")
+
+    def get_h2h_odds(self, row: dict) -> tuple[float, float, float] | None:
+        h = row.get("MS 1")
+        d = row.get("MS 0")
+        a = row.get("MS 2")
+        try:
+            return float(h.replace(",", ".")), float(d.replace(",", ".")), float(a.replace(",", "."))
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def get_totals_odds(self, row: dict) -> tuple[float, float] | None:
+        over = row.get("2.5 Ust")
+        under = row.get("2.5 Alt")
+        try:
+            return float(over.replace(",", ".")), float(under.replace(",", "."))
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def get_goals(self, row: dict) -> tuple[int, int] | None:
+        hg = row.get("Ev Sahibi Gol")
+        ag = row.get("Deplasman Gol")
+        try:
+            return int(hg), int(ag)
+        except (TypeError, ValueError):
+            return None
+
+class CSVParserFactory:
+    """Uygun parser'i dinamik olarak secer (Faz 6 Fix: Strategy-Factory Pattern)."""
+    
+    _parsers = [EnglishCSVParser, TurkishCSVParser]
+
+    @classmethod
+    def get_parser(cls, first_row: dict) -> CSVParserStrategy:
+        for parser_cls in cls._parsers:
+            if parser_cls.can_handle(first_row):
+                return parser_cls()
+        
+        # Default veya hata
+        raise ValueError("Bu CSV formatı için uygun bir parser bulunamadı.")
 
 
 --- DOSYA: clients\base_client.py ---
@@ -1383,7 +1683,7 @@ class OddsAPIClient(BaseAPIClient):
 
 from pydantic_settings import BaseSettings
 from pydantic import Field, field_validator
-from typing import ClassVar
+from typing import ClassVar, Any
 
 
 class TierLimits:
@@ -1414,7 +1714,15 @@ class TierLimits:
 class Settings(BaseSettings):
     # ── Database ──
     MONGO_URI: str
+    MONGO_TLS_SKIP_VERIFY: bool = False
     REDIS_URL: str = "redis://localhost:6379"
+
+    ENVIRONMENT: str = "development"
+    PAYMENT_PROVIDER: str = "iyzico"
+    
+    # Telegram Notifications (Faz 3 - Lightweight Alerting)
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_CHAT_ID: str | None = None
 
     # ── External APIs ──
     ODDS_API_KEY: str
@@ -1455,12 +1763,7 @@ class Settings(BaseSettings):
     ACTIVE_SPORTS: list[str] = Field(default=["football"])
 
     # ── CORS ──
-    ALLOWED_ORIGINS: list[str] = Field(
-        default=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ]
-    )
+    ALLOWED_ORIGINS: Any = Field(default=["http://localhost:3000", "http://127.0.0.1:3000"])
 
     # ── Odds API ──
     ODDS_API_BASE_URL: str = "https://api.the-odds-api.com/v4"
@@ -1483,6 +1786,13 @@ class Settings(BaseSettings):
         if not v:
             return v
         return v.replace("https://", "").replace("http://", "").rstrip("/")
+
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @classmethod
+    def parse_allowed_origins(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            return [i.strip() for i in v.split(",")]
+        return v
 
     model_config = {
         "env_file": ".env",
@@ -1518,7 +1828,10 @@ class MongoManager:
 
     async def connect(self) -> None:
         """Baglanti kur ve indeksleri olustur."""
-        self._client = AsyncIOMotorClient(settings.MONGO_URI, tlsAllowInvalidCertificates=True)
+        self._client = AsyncIOMotorClient(
+            settings.MONGO_URI, 
+            tlsAllowInvalidCertificates=settings.MONGO_TLS_SKIP_VERIFY
+        )
         self._db = self._client.get_default_database()
 
         # Baglanti testi
@@ -1538,6 +1851,14 @@ class MongoManager:
         await db.matches.create_index("odds.h2h.home")
         await db.matches.create_index("odds.h2h.draw")
         await db.matches.create_index("odds.h2h.away")
+        await db.matches.create_index("league_key")
+        
+        # Benzerlik aramasi (Similarity Search) icin bilesik indeks
+        await db.matches.create_index([
+            ("odds.h2h.home", 1),
+            ("odds.h2h.draw", 1),
+            ("odds.h2h.away", 1)
+        ])
         
         await db.matches.create_index([
             ("sport", 1),
@@ -1574,6 +1895,58 @@ class MongoManager:
 
 # Singleton
 mongo = MongoManager()
+
+
+--- DOSYA: core\logger.py ---
+import logging
+import json
+import sys
+from datetime import datetime
+from typing import Any
+
+class JsonFormatter(logging.Formatter):
+    """Logs as JSON objects."""
+    
+    def format(self, record: logging.LogRecord) -> str:
+        log_record = {
+            "timestamp": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
+            "level": record.levelname,
+            "message": record.getMessage(),
+            "module": record.module,
+            "logger": record.name
+        }
+        
+        # Add extra fields if present
+        if hasattr(record, "extra_fields"):
+            log_record.update(record.extra_fields)
+            
+        return json.dumps(log_record)
+
+import logging.handlers
+import queue
+
+def setup_logging():
+    """Configures the root logger for JSON output with a non-blocking QueueHandler."""
+    # 1. Base Handler (stdout)
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(JsonFormatter())
+    
+    # 2. Queue for Async Logging (Faz 6 Fix: Senkron loglama darboğazı engellendi)
+    log_queue = queue.Queue(-1)
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+    
+    # 3. Listener to process logs in background
+    listener = logging.handlers.QueueListener(log_queue, stream_handler)
+    listener.start()
+    
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.handlers = [queue_handler]
+    
+    return logger
+
+# Singleton logger instance
+logger = setup_logging()
 
 
 --- DOSYA: core\pricing.py ---
@@ -1678,6 +2051,10 @@ redis_manager = RedisManager()
 
 --- DOSYA: core\__init__.py ---
 # core package
+
+
+--- DOSYA: frontend\.env.local ---
+NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 
 
 --- DOSYA: frontend\CLAUDE.md ---
@@ -1925,6 +2302,7 @@ import UpcomingMatchesTable from "@/components/UpcomingMatchesTable";
 import HistoricalAnalysis from "@/components/HistoricalAnalysis";
 import SimilarMatchesTable from "@/components/SimilarMatchesTable";
 import SummaryStats from "@/components/SummaryStats";
+import { API_URL } from "@/config/constants";
 
 export default function Home() {
   const [matches, setMatches] = useState<MatchResponse[]>([]);
@@ -1940,46 +2318,61 @@ export default function Home() {
 
   // Fetch upcoming matches
   useEffect(() => {
-    const fetchMatches = async () => {
-      setLoading(true);
-      setSelectedMatch(null);
-      setSimilarMatches([]);
+    const fetchMatches = async (isSilent = false) => {
+      if (!isSilent) {
+        setLoading(true);
+        setSelectedMatch(null);
+        setSimilarMatches([]);
+      }
+      
       try {
         const url = selectedLeague
-          ? `http://127.0.0.1:8000/api/v1/football/matches/?league=${selectedLeague}`
-          : `http://127.0.0.1:8000/api/v1/football/matches/`;
+          ? `${API_URL}/api/v1/football/matches/?league=${selectedLeague}`
+          : `${API_URL}/api/v1/football/matches/`;
 
         const response = await fetch(url);
         if (!response.ok) throw new Error("Backend unreachable");
 
         const json = await response.json();
-
-        if (json && Array.isArray(json.data)) {
-          setMatches(json.data);
-        } else if (Array.isArray(json)) {
-          setMatches(json);
-        } else {
-          setMatches([]);
-        }
+        const data = json?.data || (Array.isArray(json) ? json : []);
+        setMatches(data);
       } catch (error) {
         console.error("Fetch error:", error);
-        setMatches([]);
       } finally {
-        setLoading(false);
+        if (!isSilent) setLoading(false);
       }
     };
 
+    // Initial fetch
     fetchMatches();
+
+    // Setup polling (every 2 minutes) with Visibility API check (Faz 5 Fix)
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchMatches(true);
+      }
+    }, 120000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchMatches(true);
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [selectedLeague]);
 
   // Fetch User Tier
   useEffect(() => {
     const fetchUser = async () => {
       try {
-        const token = localStorage.getItem("token");
-        if (!token) return;
-        const res = await fetch("http://127.0.0.1:8000/api/v1/auth/me", {
-          headers: { "Authorization": `Bearer ${token}` }
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
         });
         if (res.ok) {
           const data = await res.json();
@@ -1987,9 +2380,7 @@ export default function Home() {
           if (data.tier === "elite") setLimit(20);
           if (data.tier === "pro") setLimit(10);
           if (data.tier === "standard") setLimit(3);
-        } else if (res.status === 401) {
-          // Token expired or invalid, clear it
-          localStorage.removeItem("token");
+        } else {
           setUserTier("standard");
           setLimit(3);
         }
@@ -2017,18 +2408,8 @@ export default function Home() {
     if (!selectedMatch) return;
     setLoadingAnalysis(true);
     try {
-      const token = localStorage.getItem("token");
-      if (!token) {
-        throw new Error("Lütfen önce giriş yapın.");
-      }
-      
-      const headers: HeadersInit = { 
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`
-      };
-
-      const res = await fetch(`http://127.0.0.1:8000/api/v1/football/analysis/similar/${selectedMatch.external_id}?limit=${limit}`, {
-        headers,
+      const res = await fetch(`${API_URL}/api/v1/football/analysis/similar/${selectedMatch.external_id}?limit=${limit}`, {
+        credentials: "include",
       });
 
       const data = await res.json();
@@ -2290,6 +2671,7 @@ export default function PaymentSuccessPage() {
 import { useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import { API_URL } from "@/config/constants";
 
 export default function ConfirmEmailChangePage() {
   const searchParams = useSearchParams();
@@ -2307,14 +2689,16 @@ export default function ConfirmEmailChangePage() {
 
     const confirmChange = async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:8000/api/v1/auth/confirm-email-change?token=${token}`);
+        const res = await fetch(`${API_URL}/api/v1/auth/confirm-email-change?token=${token}`, {
+          credentials: "include"
+        });
         const data = await res.json();
         
         if (res.ok) {
           setStatus('success');
           setMessage("Email adresiniz başarıyla güncellendi. Lütfen yeni e-posta adresinizle giriş yapın.");
-          // Clear old token since email changed
-          localStorage.removeItem("token");
+          // Clear cookies by calling logout (Faz 1)
+          await fetch(`${API_URL}/api/v1/auth/logout`, { method: "POST", credentials: "include" });
           window.dispatchEvent(new Event('auth-change'));
         } else {
           setStatus('error');
@@ -2382,6 +2766,7 @@ export default function ConfirmEmailChangePage() {
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { API_URL } from "@/config/constants";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -2395,14 +2780,14 @@ export default function Login() {
     setError("");
     setLoading(true);
     try {
-      const response = await fetch("http://127.0.0.1:8000/api/v1/auth/login", {
+      const response = await fetch(`${API_URL}/api/v1/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email, password: password }),
+        credentials: "include",
       });
       const data = await response.json();
       if (response.ok) {
-        localStorage.setItem("token", data.access_token);
         window.dispatchEvent(new Event('auth-change'));
         router.push("/");
       } else {
@@ -2490,6 +2875,7 @@ export default function Login() {
 
 import { useState, useEffect } from "react";
 import { CheckIcon } from "@heroicons/react/24/solid";
+import { API_URL } from "@/config/constants";
 
 interface Plan {
   id: string;
@@ -2506,7 +2892,7 @@ export default function PricingPage() {
   useEffect(() => {
     const fetchPlans = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8000/api/v1/billing/plans");
+        const res = await fetch(`${API_URL}/api/v1/billing/plans`);
         if (res.ok) {
           const data = await res.json();
           setPlans(data);
@@ -2523,19 +2909,23 @@ export default function PricingPage() {
   const handleCheckout = async (planId: string) => {
     setProcessingId(planId);
     try {
-      const token = localStorage.getItem("token");
-      if (!token) {
+      // Auth check via cookies (Faz 1)
+      const authRes = await fetch(`${API_URL}/api/v1/auth/me`, {
+        credentials: "include"
+      });
+      
+      if (!authRes.ok) {
         // Redirect to register with plan_id
         window.location.href = `/register?plan=${planId}`;
         return;
       }
 
-      const res = await fetch("http://127.0.0.1:8000/api/v1/billing/checkout", {
+      const res = await fetch(`${API_URL}/api/v1/billing/checkout`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
+        credentials: "include",
         body: JSON.stringify({ plan_id: planId }),
       });
 
@@ -2668,6 +3058,7 @@ export default function PricingPage() {
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { API_URL } from "@/config/constants";
 
 export default function ProfilePage() {
   const [userData, setUserData] = useState<any>(null);
@@ -2683,13 +3074,8 @@ export default function ProfilePage() {
   useEffect(() => {
     const fetchProfile = async () => {
       try {
-        const token = localStorage.getItem("token");
-        if (!token) {
-          router.push("/login");
-          return;
-        }
-        const res = await fetch("http://127.0.0.1:8000/api/v1/auth/me", {
-          headers: { "Authorization": `Bearer ${token}` }
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
         });
         if (res.ok) {
           const data = await res.json();
@@ -2718,13 +3104,12 @@ export default function ProfilePage() {
 
     setSubmitting(true);
     try {
-      const token = localStorage.getItem("token");
-      const res = await fetch("http://127.0.0.1:8000/api/v1/auth/change-password", {
+      const res = await fetch(`${API_URL}/api/v1/auth/change-password`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
         },
+        credentials: "include",
         body: JSON.stringify({
           current_password: passwordData.current_password,
           new_password: passwordData.new_password
@@ -2752,13 +3137,12 @@ export default function ProfilePage() {
     setSubmittingEmail(true);
 
     try {
-      const token = localStorage.getItem("token");
-      const res = await fetch("http://127.0.0.1:8000/api/v1/auth/request-email-change", {
+      const res = await fetch(`${API_URL}/api/v1/auth/request-email-change`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
         },
+        credentials: "include",
         body: JSON.stringify({ new_email: newEmail })
       });
 
@@ -2919,6 +3303,7 @@ export default function ProfilePage() {
 import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { API_URL } from "@/config/constants";
 
 function RegisterContent() {
   const [formData, setFormData] = useState({ display_name: "", email: "", password: "" });
@@ -2940,7 +3325,7 @@ function RegisterContent() {
     setLoading(true);
     try {
       // Guest Checkout: Kayıt ve Ödeme birlikte
-      const response = await fetch("http://127.0.0.1:8000/api/v1/billing/guest-checkout", {
+      const response = await fetch(`${API_URL}/api/v1/billing/guest-checkout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -3052,6 +3437,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import TopHeader from "@/components/TopHeader";
+import { API_URL } from "@/config/constants";
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -3062,12 +3448,27 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const isPublicPage = publicRoutes.includes(pathname);
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token && !isPublicPage) {
-      router.push("/login");
-    } else {
-      setIsAuthChecking(false);
-    }
+    const checkAuth = async () => {
+      if (isPublicPage) {
+        setIsAuthChecking(false);
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
+        });
+        if (res.ok) {
+          setIsAuthChecking(false);
+        } else {
+          router.push("/login");
+        }
+      } catch (err) {
+        router.push("/login");
+      }
+    };
+    
+    checkAuth();
   }, [pathname, isPublicPage, router]);
 
   if (isAuthChecking && !isPublicPage) {
@@ -3100,6 +3501,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_URL } from "@/config/constants";
 
 interface FiltersProps {
   onLeagueChange: (val: string) => void;
@@ -3127,7 +3529,9 @@ export default function Filters({ onLeagueChange }: FiltersProps) {
   useEffect(() => {
     const fetchLeagues = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8000/api/v1/football/matches/leagues");
+        const res = await fetch(`${API_URL}/api/v1/football/matches/leagues`, {
+          credentials: "include"
+        });
         if (res.ok) {
           const data = await res.json();
           // Sadece tanımlı olduğumuz ve veri çektiğimiz ligleri göster
@@ -3268,15 +3672,22 @@ export default function HistoricalAnalysis({
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { API_URL } from "@/config/constants";
 
 export default function Navbar() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
-    const checkToken = () => {
-      const token = localStorage.getItem("token");
-      setIsLoggedIn(!!token);
+    const checkToken = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
+        });
+        setIsLoggedIn(res.ok);
+      } catch (err) {
+        setIsLoggedIn(false);
+      }
     };
 
     // Initial check
@@ -3289,8 +3700,16 @@ export default function Navbar() {
     return () => window.removeEventListener("auth-change", checkToken);
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem("token");
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_URL}/api/v1/auth/logout`, { 
+        method: "POST",
+        credentials: "include"
+      });
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
+    setIsLoggedIn(false);
     window.dispatchEvent(new Event('auth-change'));
     router.push("/login");
   };
@@ -3650,6 +4069,7 @@ export default function SummaryStats({ results }: SummaryStatsProps) {
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { API_URL } from "@/config/constants";
 
 export default function TopHeader() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -3657,30 +4077,25 @@ export default function TopHeader() {
   const router = useRouter();
 
   const fetchUser = async () => {
-    const token = localStorage.getItem("token");
-    if (!token) {
-      setIsLoggedIn(false);
-      setUserData(null);
-      return;
-    }
-    setIsLoggedIn(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/v1/auth/me", {
-        headers: { "Authorization": `Bearer ${token}` }
+      const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+        credentials: "include"
       });
       if (res.ok) {
+        setIsLoggedIn(true);
         const data = await res.json();
         setUserData({
           name: data.display_name,
           tier: data.tier
         });
-      } else if (res.status === 401) {
-        localStorage.removeItem("token");
+      } else {
         setIsLoggedIn(false);
         setUserData(null);
       }
     } catch (err) {
       console.error(err);
+      setIsLoggedIn(false);
+      setUserData(null);
     }
   };
 
@@ -3690,8 +4105,17 @@ export default function TopHeader() {
     return () => window.removeEventListener("auth-change", fetchUser);
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem("token");
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_URL}/api/v1/auth/logout`, { 
+        method: "POST",
+        credentials: "include"
+      });
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
+    setIsLoggedIn(false);
+    setUserData(null);
     window.dispatchEvent(new Event('auth-change'));
     router.push("/login");
   };
@@ -3850,6 +4274,10 @@ export default function UpcomingMatchesTable({ matches, selectedMatchId, onSelec
 }
 
 
+--- DOSYA: frontend\src\config\constants.ts ---
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+
 --- DOSYA: frontend\src\types\index.ts ---
 export interface H2HOdds {
   home: number;
@@ -3946,6 +4374,7 @@ Yeni yaklasim (Sliding Window — Redis Sorted Set):
 """
 
 import time
+import uuid
 
 from fastapi import Request, HTTPException
 from core.config import TierLimits
@@ -3971,18 +4400,15 @@ class RateLimiter:
         user_tier = getattr(request.state, "user_tier", UserTier.STANDARD.value)
         user_id = getattr(request.state, "user_id", None)
 
-        # Identifier: giris yapildiysa user_id, yapilmadiysa gercek IP
+        # Identifier: giris yapildiysa user_id, yapilmadiysa IP
         if user_id:
             identifier = f"user:{user_id}"
         else:
-            x_forwarded_for = request.headers.get("x-forwarded-for")
-            if x_forwarded_for:
-                identifier = x_forwarded_for.split(",")[0].strip()
-            else:
-                identifier = request.headers.get(
-                    "x-real-ip",
-                    request.client.host if request.client else "unknown_ip",
-                )
+            # Faz 6 Fix: Rate Limiter Spoofing Engellendi.
+            # X-Forwarded-For basligina uygulama katmaninda guvenilmez (spoofing riski).
+            # En saglikli yol, Load Balancer arkasinda "ProxyHeadersMiddleware" (Uvicorn)
+            # kullanmaktir. Boylece request.client.host LB tarafindan dogrulanmis IP olur.
+            identifier = request.client.host if request.client else "unknown_ip"
 
         # Limit: init'te override varsa o kullanilir, yoksa tier'dan gelir
         limit = self.rpm if self.rpm is not None else TierLimits.get_rate_limit(user_tier)
@@ -3999,7 +4425,8 @@ class RateLimiter:
             # Pipeline: eski kayitlari temizle → yeni kaydi ekle → say → TTL ayarla
             async with redis.pipeline(transaction=True) as pipe:
                 pipe.zremrangebyscore(redis_key, "-inf", window_start)
-                pipe.zadd(redis_key, {str(now): now})
+                # Faz 6 Fix: Member unique olmali (uuid eklendi)
+                pipe.zadd(redis_key, {f"{now}:{uuid.uuid4().hex}": now})
                 pipe.zcard(redis_key)
                 pipe.expire(redis_key, 60)
                 results = await pipe.execute()
@@ -4015,8 +4442,48 @@ class RateLimiter:
         except HTTPException:
             raise
         except Exception:
-            # Redis arizi durumunda istege izin ver (fail-open)
-            pass
+            # Redis arizasi durumunda guvenlik icin istegi reddet (fail-closed) - Faz 1
+            raise HTTPException(
+                status_code=503,
+                detail="Rate limiter servisi su an kullanilamiyor. Lutfen daha sonra tekrar deneyin."
+            )
+
+
+--- DOSYA: middleware\security.py ---
+"""Security headers middleware.
+Sets HSTS, CSP, X-Content-Type-Options, etc.
+"""
+
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+from typing import Callable
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Adds security headers to every response."""
+    
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        response = await call_next(request)
+        
+        # HSTS (HTTP Strict Transport Security) - 1 year
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        
+        # X-Content-Type-Options
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        
+        # X-Frame-Options (Prevent clickjacking)
+        response.headers["X-Frame-Options"] = "DENY"
+        
+        # X-XSS-Protection
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        
+        # Referrer-Policy
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        
+        # Content-Security-Policy (Basic)
+        # In a real app, this should be more specific
+        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none';"
+        
+        return response
 
 
 --- DOSYA: middleware\telemetry.py ---
@@ -4031,11 +4498,9 @@ from typing import Callable
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.background import BackgroundTask
 
-from core.database import mongo
-from repositories.analytics_repository import AnalyticsRepository
 from schemas.analytics import RequestLog
+from core.logger import logger
 
 
 class TelemetryMiddleware(BaseHTTPMiddleware):
@@ -4070,11 +4535,12 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
             ip_address = request.client.host if request.client else ""
             user_agent = request.headers.get("user-agent", "")
 
-            # Kullanici bilgisi (eger auth middleware tarafindan eklenmisse)
+            # Kullanici bilgisini al
             user_id = getattr(request.state, "user_id", None)
 
+            # Log verisini hazirla
             log_data = RequestLog(
-                user_id=user_id,
+                user_id=str(user_id) if user_id else None,
                 method=method,
                 endpoint=endpoint,
                 status_code=status_code,
@@ -4083,30 +4549,11 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
                 user_agent=user_agent
             )
 
-            # Eger response nesnesi varsa, arka plan gorevi ekle.
-            # Yoksa (exception olduysa), manuel calistiracagiz (fire-and-forget).
-            if 'response' in locals() and hasattr(response, "background") and response.background is not None:
-                # Eger mevcut bir background task varsa, bizimkini de calistirmak icin 
-                # manuel eklemek daha saglikli.
-                pass
-            
-            # Repoyu olusturup asenkron background gorevi olarak atayalim
-            # Fastapi'de background tasklari dogrudan router'da eklenir ama middleware icinde
-            # starlette'in yapisindan faydalanarak ekleyebiliriz.
-            
-            async def write_log(data: RequestLog):
-                try:
-                    db = mongo.get_db()
-                    repo = AnalyticsRepository(db)
-                    await repo.insert_log(data)
-                except Exception:
-                    pass # Loglamada hata olursa gormezden gel
-
-            if 'response' in locals() and isinstance(response, Response):
-                # Mevcut task'i ezip kendi task'imizi (birden fazla eklenebilir hale) getiriyoruz
-                # starlette.background.BackgroundTasks ile birden fazla task eklenebilir
-                # Ancak burada basitce tek bir task ekliyoruz
-                response.background = BackgroundTask(write_log, log_data)
+            # JSON formatinda stdout'a logla (Faz 2: Centralized Logging)
+            logger.info(
+                f"API Request: {method} {endpoint} {status_code}",
+                extra={"extra_fields": log_data.model_dump()}
+            )
         
         return response
 
@@ -4294,6 +4741,14 @@ class UserRepository:
         except Exception:
             return False
 
+    async def delete(self, user_id: str) -> bool:
+        """Kullanici kaydini kalici olarak siler (KVKK/GDPR)."""
+        try:
+            result = await self.collection.delete_one({"_id": ObjectId(user_id)})
+            return result.deleted_count > 0
+        except Exception:
+            return False
+
 
 --- DOSYA: repositories\__init__.py ---
 # repositories package
@@ -4359,11 +4814,13 @@ from middleware.rate_limiter import RateLimiter
 from schemas.auth import UserInDB
 from services.analysis_service import AnalysisService
 from utils.dependencies import get_analysis_service, get_current_active_user
+from utils.cache import cache_response
 
 router = APIRouter(prefix="/api/v1/football/analysis", tags=["Football Analysis"])
 
 
 @router.get("/similar/{match_id}", dependencies=[Depends(RateLimiter())])
+@cache_response(expire=600, key_prefix="analysis")
 async def get_similar_matches(
     match_id: str,
     limit: int | None = Query(None, ge=1, le=20, description="PRO/ELITE kullanicilar icin ozel limit belirleme"),
@@ -4399,7 +4856,9 @@ Endpoints:
   GET  /api/v1/auth/me              — Profil bilgisi
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+import hashlib
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, Request
 
 from clients.email_client import email_client
 from core.config import settings
@@ -4415,6 +4874,7 @@ from schemas.auth import (
     UserInDB,
     UserLogin,
     UserResponse,
+    AccountDeleteRequest,
 )
 from services.auth_service import AuthService
 from utils.dependencies import get_auth_service, get_current_active_user
@@ -4430,6 +4890,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 )
 async def register(
     user_in: UserCreate,
+    response: Response,
     background_tasks: BackgroundTasks,
     auth_service: AuthService = Depends(get_auth_service),
 ):
@@ -4451,6 +4912,26 @@ async def register(
     refresh_token = await auth_service.create_refresh_token(
         user.id, user.tier, user.is_superuser
     )
+
+    # Cookie tabanli auth (Faz 1)
+    is_prod = settings.ENVIRONMENT == "production"
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+    )
+
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
@@ -4460,6 +4941,7 @@ async def register(
 @router.post("/login", response_model=TokenResponse)
 async def login(
     credentials: UserLogin,
+    response: Response,
     auth_service: AuthService = Depends(get_auth_service),
 ):
     # Brute-force check
@@ -4485,6 +4967,26 @@ async def login(
     refresh_token = await auth_service.create_refresh_token(
         user.id, user.tier, user.is_superuser
     )
+
+    # Cookie tabanli auth (Faz 1)
+    is_prod = settings.ENVIRONMENT == "production"
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+    )
+
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
 
@@ -4493,27 +4995,62 @@ async def login(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_access_token(
-    body: RefreshRequest,
+    request: Request,
+    response: Response,
+    body: Optional[RefreshRequest] = None,
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Gecerli bir refresh token ile yeni bir access + refresh token cifti uretir.
 
     Eski refresh token otomatik olarak iptal edilir (token rotation).
     """
-    token_data = await auth_service.verify_refresh_token(body.refresh_token)
-    if not token_data:
+    refresh_token = (body.refresh_token if body else None) or request.cookies.get("refresh_token")
+    
+    if not refresh_token:
         raise HTTPException(
-            status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
+            status_code=401, detail="Refresh token bulunamadi."
         )
 
-    # Rotate: revoke old, issue new pair
-    await auth_service.revoke_refresh_token(body.refresh_token)
+    # Distributed Lock (Faz 6 Fix: Race Condition / Token Cloning)
+    from core.redis_client import redis_manager
+    redis = redis_manager.get_client()
+    lock_key = f"lock:refresh:{hashlib.md5(refresh_token.encode()).hexdigest()}"
+    
+    async with redis.lock(lock_key, timeout=10):
+        token_data = await auth_service.verify_refresh_token(refresh_token)
+        if not token_data:
+            raise HTTPException(
+                status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
+            )
+    
+        # Rotate: revoke old, issue new pair
+        await auth_service.revoke_refresh_token(refresh_token)
     new_access = auth_service.create_access_token(
         token_data.user_id, token_data.tier, token_data.is_superuser
     )
     new_refresh = await auth_service.create_refresh_token(
         token_data.user_id, token_data.tier, token_data.is_superuser
     )
+
+    # Cookie tabanli auth (Faz 1)
+    is_prod = settings.ENVIRONMENT == "production"
+    response.set_cookie(
+        key="access_token",
+        value=new_access,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+    )
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh,
+        httponly=True,
+        secure=is_prod,
+        samesite="strict",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+    )
+
     return TokenResponse(access_token=new_access, refresh_token=new_refresh)
 
 
@@ -4522,13 +5059,27 @@ async def refresh_access_token(
 
 @router.post("/logout", status_code=200)
 async def logout(
-    body: RefreshRequest,
+    request: Request,
+    response: Response,
     current_user: UserInDB = Depends(get_current_active_user),
     auth_service: AuthService = Depends(get_auth_service),
 ):
-    """Refresh token'i iptal eder. Access token kendi TTL'i dolana kadar gecerli kalir
-    (kisa TTL — 30 dk — bunu tolere edilebilir kilar)."""
-    await auth_service.revoke_refresh_token(body.refresh_token)
+    """Refresh token'i iptal eder ve cookieleri temizler."""
+    refresh_token = request.cookies.get("refresh_token")
+    
+    if refresh_token:
+        await auth_service.revoke_refresh_token(refresh_token)
+    # Cookieleri temizle (Faz 6 Fix: Ghost Cookies)
+    is_prod = settings.ENVIRONMENT == "production"
+    cookie_params = {
+        "path": "/",
+        "httponly": True,
+        "secure": is_prod,
+        "samesite": "strict",
+    }
+    response.delete_cookie("access_token", **cookie_params)
+    response.delete_cookie("refresh_token", **cookie_params)
+    
     return {"message": "Basariyla cikis yapildi."}
 
 
@@ -4661,6 +5212,29 @@ async def confirm_email_change(
         )
     return {"message": "Email adresiniz basariyla guncellendi."}
 
+# ── Account Deletion (GDPR) ───────────────────────────────────────────────────
+
+@router.delete("/account", status_code=status.HTTP_200_OK)
+async def delete_account(
+    body: AccountDeleteRequest,
+    response: Response,
+    current_user: UserInDB = Depends(get_current_active_user),
+    auth_service: AuthService = Depends(get_auth_service),
+):
+    """Kullanicinin hesabini ve verilerini kalici olarak siler (GDPR)."""
+    success = await auth_service.delete_account(current_user.id, body.password)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sifre hatali veya hesap silinemedi."
+        )
+    
+    # Cookieleri temizle
+    response.delete_cookie("access_token")
+    response.delete_cookie("refresh_token")
+    
+    return {"message": "Hesabiniz ve tum verileriniz basariyla silindi."}
+
 
 --- DOSYA: routers\billing.py ---
 """Odeme ve abonelik API yonlendiricisi — Provider Agnostic."""
@@ -4674,8 +5248,6 @@ from core.database import mongo
 from repositories.user_repository import UserRepository
 from schemas.auth import UserInDB, UserTier
 from services.billing_service import BillingService
-from services.payment.iyzico_provider import IyzicoProvider
-from services.payment.stripe_provider import StripeProvider
 from utils.dependencies import get_current_active_user
 
 logger = logging.getLogger(__name__)
@@ -4685,11 +5257,14 @@ router = APIRouter(prefix="/api/v1/billing", tags=["Billing"])
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
+from services.payment.factory import PaymentProviderFactory
+
 async def get_billing_service() -> BillingService:
     db = mongo.get_db()
-    # Varsayilan olarak Iyzico kullaniyoruz. 
-    # Ileride settings'den provider seçilebilir: settings.PAYMENT_PROVIDER
-    provider = IyzicoProvider() 
+    
+    # Faz 6 Fix: Strategy Pattern Factory kullanimi
+    provider = PaymentProviderFactory.get_provider(settings.PAYMENT_PROVIDER)
+        
     return BillingService(user_repo=UserRepository(db), provider=provider)
 
 
@@ -4804,16 +5379,54 @@ async def billing_webhook(
 
     headers = request.headers
     
-    success = await billing_service.handle_webhook(payload, headers)
+    # Idempotency Kontrolü (Faz 5 Fix: Provider-Specific Unique ID + Atomic SET NX)
+    # Iyzico 'token' veya 'paymentId' gönderir. Stripe 'id' (event id) gönderir.
+    unique_id = (
+        payload.get("token") or 
+        payload.get("paymentId") or 
+        payload.get("id") or 
+        headers.get("X-Idempotency-Key")
+    )
     
-    if success:
-        # Odeme basariliysa giris sayfasina yonlendir (veya dashboard)
-        return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/login?payment=success", 
-            status_code=303
-        )
+    if unique_id:
+        from core.redis_client import redis_manager
+        redis = redis_manager.get_client()
+        lock_key = f"idempotency:billing:{unique_id}"
+        
+        # Atomic SET NX: Sadece anahtar yoksa yaz ve True dön. (Race condition engellenir)
+        is_new = await redis.set(lock_key, "processing", ex=300, nx=True) # Başlangıçta 5 dk kilit
+        if not is_new:
+            current_status = await redis.get(lock_key)
+            if current_status == "processing":
+                logger.warning("Webhook hala isleniyor (409): %s", unique_id)
+                raise HTTPException(status_code=409, detail="Payment is currently being processed. Please try again later.")
+            
+            logger.info("Mükerrer webhook isteği engellendi (Already processed): %s", unique_id)
+            return {"status": "already_processed"}
+
+    try:
+        success = await billing_service.handle_webhook(payload, headers)
+        
+        if success:
+            if unique_id:
+                # İşlem başarılıysa kilidi 24 saate uzat (artık 'processed')
+                await redis.setex(lock_key, 86400, "processed")
+            
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?payment=success", 
+                status_code=303
+            )
+        else:
+            # İşlem başarısızsa kilidi kaldır (retry için)
+            if unique_id:
+                await redis.delete(lock_key)
+    except Exception as e:
+        logger.error("Webhook işleme hatası: %s", str(e))
+        if unique_id:
+            await redis.delete(lock_key)
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
     
-    # Basarisizsa planlar sayfasina hata ile don
+    # Başarısızsa planlar sayfasina hata ile don
     return RedirectResponse(
         url=f"{settings.FRONTEND_URL}/pricing?error=payment_failed", 
         status_code=303
@@ -4831,11 +5444,13 @@ from middleware.rate_limiter import RateLimiter
 from schemas.match import MatchResponse, MatchListResponse
 from services.match_service import MatchService
 from utils.dependencies import get_match_service
+from utils.cache import cache_response
 
 router = APIRouter(prefix="/api/v1/football/matches", tags=["Football Matches"])
 
 
 @router.get("/", response_model=MatchListResponse, dependencies=[Depends(RateLimiter())])
+@cache_response(expire=300, key_prefix="matches")
 async def get_upcoming_matches(
     league: str | None = Query(None, description="Lig koduna gore filtrele (orn: soccer_epl)"),
     page: int = Query(1, ge=1, description="Sayfa numarasi"),
@@ -4865,6 +5480,7 @@ async def get_upcoming_matches(
 
 
 @router.get("/leagues", response_model=list[str], dependencies=[Depends(RateLimiter())])
+@cache_response(expire=3600, key_prefix="leagues")
 async def get_leagues(service: MatchService = Depends(get_match_service)):
     """Sistemde aktif verisi bulunan ligleri listeler."""
     return await service.get_available_leagues(sport="football")
@@ -5008,6 +5624,12 @@ class PasswordChangeRequest(BaseModel):
 class EmailChangeRequest(BaseModel):
     """Email degistirme isteği."""
     new_email: EmailStr
+
+# ── Account Deletion (GDPR) ───────────────────────────────────────────────────
+
+class AccountDeleteRequest(BaseModel):
+    """Hesap silme isteği."""
+    password: str
 
 
 --- DOSYA: schemas\match.py ---
@@ -5243,6 +5865,8 @@ Yeni yaklasim:
 """
 
 import logging
+import math
+import asyncio
 from pydantic import BaseModel
 
 from core.config import TierLimits
@@ -5338,73 +5962,70 @@ class AnalysisService:
         away: float,
         limit: int,
     ) -> list[SimilarMatchResult]:
-        """MongoDB aggregation pipeline ile Euclidean mesafeyi DB'de hesaplar."""
+        """Kabaca filtrelenmis veriyi DB'den ceker, mesafeyi Python'da hesaplar (Faz 6 Fix)."""
+        
+        # 1. MongoDB'den sadece kabaca filtrelenmis veriyi cek (İndeksli alanlar üzerinden)
+        # Bu sayede DB tarafında COLLSCAN ve In-Memory Sort engellenir.
         pipeline = [
-            # 1. Sadece tamamlanmis maclar
             {"$match": {"status": "completed"}},
-            # 2. h2h odds mevcut olanlar
             {
                 "$match": {
-                    "odds.h2h.home": {"$exists": True, "$ne": None},
-                    "odds.h2h.draw": {"$exists": True, "$ne": None},
-                    "odds.h2h.away": {"$exists": True, "$ne": None},
+                    "odds.h2h.home": {"$gte": home - 1.0, "$lte": home + 1.0},
+                    "odds.h2h.draw": {"$gte": draw - 1.0, "$lte": draw + 1.0},
+                    "odds.h2h.away": {"$gte": away - 1.0, "$lte": away + 1.0},
                 }
             },
-            # 3. Euclidean mesafeyi hesapla
-            {
-                "$addFields": {
-                    "distance": {
-                        "$sqrt": {
-                            "$add": [
-                                {"$pow": [{"$subtract": ["$odds.h2h.home", home]}, 2]},
-                                {"$pow": [{"$subtract": ["$odds.h2h.draw", draw]}, 2]},
-                                {"$pow": [{"$subtract": ["$odds.h2h.away", away]}, 2]},
-                            ]
-                        }
-                    }
-                }
-            },
-            # 4. Sadece DISTANCE_THRESHOLD altindakileri al
-            {"$match": {"distance": {"$lt": DISTANCE_THRESHOLD}}},
-            # 5. En yakin once sirala
-            {"$sort": {"distance": 1}},
-            # 6. Sadece ihtiyac kadar cek
-            {"$limit": limit},
+            # Bellek dostu limit: Cok fazla veri gelirse bile hard cap koy (Ornegin 2000)
+            {"$limit": 2000}
         ]
 
         db = self.repo.collection.database
         cursor = db.matches.aggregate(pipeline)
-        docs = await cursor.to_list(length=limit)
+        docs = await cursor.to_list(length=2000)
 
-        results: list[SimilarMatchResult] = []
-        for doc in docs:
-            try:
-                distance = float(doc.get("distance", 999))
-                sim_pct = max(0.0, 100.0 - (distance * 33.3))
-                results.append(
-                    SimilarMatchResult(
-                        match=MatchInDB(
-                            **{k: v for k, v in doc.items() if k != "distance"}
-                        ),
-                        distance=round(distance, 4),
-                        similarity_percentage=round(sim_pct, 1),
+        def process_docs(docs_list):
+            results_local = []
+            for doc in docs_list:
+                try:
+                    h = doc["odds"]["h2h"]["home"]
+                    d = doc["odds"]["h2h"]["draw"]
+                    a = doc["odds"]["h2h"]["away"]
+                    
+                    # Euclidean mesafe (Python tarafında)
+                    dist = math.sqrt(
+                        (h - home)**2 + (d - draw)**2 + (a - away)**2
                     )
-                )
-            except Exception as exc:
-                logger.warning("Aggregation doc parse hatasi: %s", exc)
-                continue
+                    
+                    if dist < DISTANCE_THRESHOLD:
+                        sim_pct = max(0.0, 100.0 - (dist * 33.3))
+                        results_local.append(
+                            SimilarMatchResult(
+                                match=MatchInDB(**doc),
+                                distance=round(dist, 4),
+                                similarity_percentage=round(sim_pct, 1),
+                            )
+                        )
+                except Exception:
+                    continue
+            
+            # Python tarafında sıralama (MongoDB In-memory sort limit sorunu yok)
+            results_local.sort(key=lambda x: x.distance)
+            return results_local[:limit]
 
-        return results
+        # Agır CPU islemi (2000 objenin traverse edilmesi) oldugu icin thread'e aliyoruz
+        return await asyncio.to_thread(process_docs, docs)
 
 
 --- DOSYA: services\auth_service.py ---
 """Kimlik dogrulama is mantigi ve JWT islemleri."""
 
+import asyncio
 import secrets
 from datetime import datetime, timedelta
 
 from passlib.context import CryptContext
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError
 
 from core.config import settings
 from core.redis_client import redis_manager
@@ -5422,19 +6043,27 @@ class AuthService:
 
     # ── Password ──────────────────────────────────────────────────────────────
 
-    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        return pwd_context.verify(plain_password, hashed_password)
+    async def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        # Faz 6 Fix: CPU-bound bcrypt islemi event loop'u kilitlememesi icin thread'e alindi
+        return await asyncio.to_thread(pwd_context.verify, plain_password, hashed_password)
 
-    def get_password_hash(self, password: str) -> str:
-        return pwd_context.hash(password)
+    async def get_password_hash(self, password: str) -> str:
+        # Faz 6 Fix: CPU-bound bcrypt islemi event loop'u kilitlememesi icin thread'e alindi
+        return await asyncio.to_thread(pwd_context.hash, password)
 
     async def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
         user = await self.repo.get_by_id(user_id)
-        if not user or not self.verify_password(current_password, user.hashed_password):
+        if not user or not await self.verify_password(current_password, user.hashed_password):
             return False
         
-        new_hash = self.get_password_hash(new_password)
-        return await self.repo.update_password(user_id, new_hash)
+        new_hash = await self.get_password_hash(new_password)
+        updated = await self.repo.update_password(user_id, new_hash)
+        
+        if updated:
+            # Faz 6 Fix: Sifre degistiginde tum aktif oturumlari (refresh token) iptal et
+            await self.revoke_all_user_tokens(user_id)
+            
+        return updated
 
     # ── Brute Force Protection ───────────────────────────────────────────────
 
@@ -5490,7 +6119,7 @@ class AuthService:
                 is_superuser=is_superuser,
                 exp=datetime.utcfromtimestamp(payload["exp"]) if payload.get("exp") else None,
             )
-        except JWTError:
+        except PyJWTError:
             return None
 
     # ── Refresh token (revocable) ─────────────────────────────────────────────
@@ -5515,6 +6144,21 @@ class AuthService:
 
         redis = redis_manager.get_client()
         await redis.setex(f"refresh_token:{jti}", expire_seconds, user_id)
+        
+        # Faz 6 Fix: Bellek sızıntısı engellendi (ZSET + Expiry Score)
+        # Score = timestamp of expiration
+        exp_timestamp = int(datetime.utcnow().timestamp()) + expire_seconds
+        set_key = f"user_tokens:{user_id}"
+        
+        async with redis.pipeline(transaction=True) as pipe:
+            # 1. Yeni token'i ekle
+            pipe.zadd(set_key, {jti: exp_timestamp})
+            # 2. Suresi dolmus olanlari temizle (Memory leak fix)
+            pipe.zremrangebyscore(set_key, "-inf", int(datetime.utcnow().timestamp()))
+            # 3. Set'in kendisi de bir noktada silinsin
+            pipe.expire(set_key, expire_seconds)
+            await pipe.execute()
+        
         return token
 
     async def verify_refresh_token(self, token: str) -> TokenData | None:
@@ -5541,7 +6185,7 @@ class AuthService:
                 tier=UserTier(tier_str),
                 is_superuser=payload.get("is_superuser", False),
             )
-        except JWTError:
+        except PyJWTError:
             return None
 
     async def revoke_refresh_token(self, token: str) -> bool:
@@ -5554,13 +6198,34 @@ class AuthService:
                 options={"verify_exp": False},  # Suresi dolmus token'lari da iptal et
             )
             jti = payload.get("jti")
+            user_id = payload.get("sub")
             if not jti:
                 return False
             redis = redis_manager.get_client()
             await redis.delete(f"refresh_token:{jti}")
+            if user_id:
+                await redis.zrem(f"user_tokens:{user_id}", jti)
             return True
-        except JWTError:
+        except PyJWTError:
             return False
+
+    async def revoke_all_user_tokens(self, user_id: str) -> None:
+        """Kullanicinin tum aktif refresh token'larini iptal eder (O(1) performans)."""
+        redis = redis_manager.get_client()
+        set_key = f"user_tokens:{user_id}"
+        
+        # 1. Tum JTI'lari al (ZSET versiyonu)
+        jtis = await redis.zrange(set_key, 0, -1)
+        if not jtis:
+            return
+            
+        # 2. Refresh token'lari sil
+        async with redis.pipeline(transaction=True) as pipe:
+            for jti in jtis:
+                pipe.delete(f"refresh_token:{jti}")
+            # 3. Set'i sil
+            pipe.delete(set_key)
+            await pipe.execute()
 
     # ── Email verification ────────────────────────────────────────────────────
 
@@ -5580,7 +6245,7 @@ class AuthService:
             if not user:
                 return False
             return await self.repo.verify_user(user.id)
-        except JWTError:
+        except PyJWTError:
             return False
 
     # ── Email change ──────────────────────────────────────────────────────────
@@ -5611,7 +6276,7 @@ class AuthService:
                 return False
                 
             return await self.repo.update_email(user_id, new_email)
-        except JWTError:
+        except PyJWTError:
             return False
 
     # ── Password reset ────────────────────────────────────────────────────────
@@ -5633,9 +6298,9 @@ class AuthService:
             user = await self.repo.get_by_email(email)
             if not user:
                 return False
-            new_hash = self.get_password_hash(new_password)
+            new_hash = await self.get_password_hash(new_password)
             return await self.repo.update_password(user.id, new_hash)
-        except JWTError:
+        except PyJWTError:
             return False
 
     # ── Register / Login ──────────────────────────────────────────────────────
@@ -5644,7 +6309,7 @@ class AuthService:
         existing = await self.repo.get_by_email(user_in.email)
         if existing:
             return None
-        hashed_password = self.get_password_hash(user_in.password)
+        hashed_password = await self.get_password_hash(user_in.password)
         new_user = UserInDB(
             email=user_in.email,
             display_name=user_in.display_name,
@@ -5654,6 +6319,14 @@ class AuthService:
             is_superuser=False,
         )
         return await self.repo.create(new_user)
+
+    async def delete_account(self, user_id: str, password: str) -> bool:
+        """Kullanici hesabini siler ve tum bagli verileri temizler."""
+        user = await self.repo.get_by_id(user_id)
+        if not user or not await self.verify_password(password, user.hashed_password):
+            return False
+        
+        return await self.repo.delete(user_id)
 
 
 --- DOSYA: services\billing_service.py ---
@@ -5829,6 +6502,28 @@ class BasePaymentProvider(ABC):
         pass
 
 
+--- DOSYA: services\payment\factory.py ---
+from core.config import settings
+from services.payment.iyzico_provider import IyzicoProvider
+from services.payment.stripe_provider import StripeProvider
+from services.payment.base_provider import PaymentProvider
+
+class PaymentProviderFactory:
+    """Payment providerlar icin Strategy Pattern Factory."""
+    
+    _providers = {
+        "stripe": StripeProvider,
+        "iyzico": IyzicoProvider
+    }
+
+    @classmethod
+    def get_provider(cls, provider_name: str) -> PaymentProvider:
+        provider_class = cls._providers.get(provider_name.lower())
+        if not provider_class:
+            raise ValueError(f"Desteklenmeyen odeme saglayicisi: {provider_name}")
+        return provider_class()
+
+
 --- DOSYA: services\payment\iyzico_provider.py ---
 import logging
 import asyncio
@@ -6002,8 +6697,7 @@ class StripeProvider(BasePaymentProvider):
             raise ValueError(f"Gecersiz plan: {plan_id}")
 
         # Stripe USD kullaniyor varsayiyoruz
-        session = await asyncio.to_thread(
-            stripe.checkout.Session.create,
+        session = await stripe.checkout.Session.create_async(
             payment_method_types=["card"],
             mode="payment", # Abonelik yerine tek seferlik odeme (basitlik icin)
             customer_email=user_email,
@@ -6066,6 +6760,7 @@ from clients.odds_api_client import OddsAPIClient
 from core.config import settings
 from core.database import mongo
 from core.redis_client import redis_manager
+from utils.lock import distributed_lock
 
 logger = logging.getLogger(__name__)
 
@@ -6083,23 +6778,11 @@ SKIP_IF_FRESH_HOURS = 4
 # ═══════════════════════════════════════════════
 
 
+@distributed_lock("lock:ingestion:upcoming", timeout=900)
 async def fetch_upcoming_matches() -> None:
-    """Zamanlanmis cron job: Yaklasan maclarin oranlarini ceker.
-
-    Sadece TARGET_LEAGUES icindeki ligler icin calisir.
-    Zaten guncel olan maclar atlanir (kota optimizasyonu).
-    17:00 ve 21:00 TR saatlerinde otomatik tetiklenir.
-    """
-    redis = redis_manager.get_client()
-    lock = redis.lock("lock:ingestion:upcoming", timeout=600, blocking_timeout=1)
-    
-    acquired = await lock.acquire()
-    if not acquired:
-        logger.info("Ingestion gorevi baska bir worker tarafindan calistiriliyor. Atlaniyor.")
-        return
-
+    """The Odds API'den yaklasan maclari ceker ve DB'ye yazar (Dagitik kilit ile)."""
     try:
-        logger.info("═══ YAKLASAN MAC GUNCELLEME BASLADI ═══")
+        logger.info("═══ YAKLASAN MACLARI CEKME BASLADI ═══")
 
         adapter = ADAPTERS.get("football")
         if not adapter:
@@ -6131,11 +6814,9 @@ async def fetch_upcoming_matches() -> None:
             "═══ GUNCELLEME TAMAMLANDI: %d yeni, %d atlandi ═══",
             total_new, total_skipped,
         )
-    finally:
-        try:
-            await lock.release()
-        except Exception:
-            pass
+    except Exception as exc:
+        logger.error("Ingestion genel hatasi: %s", exc)
+        raise
 
 
 async def _fetch_league(
@@ -6206,12 +6887,17 @@ async def _upsert_to_db(entities: list) -> None:
     db = mongo.get_db()
     operations = []
 
-    for entity in entities:
-        doc = entity.model_dump()
+    def _get_docs(entities_list):
+        return [e.model_dump() for e in entities_list]
+
+    # Faz 6 Fix: Pydantic model_dump (CPU-intensive) thread'e alindi
+    docs = await asyncio.to_thread(_get_docs, entities)
+
+    for i, entity in enumerate(entities):
         operations.append(
             UpdateOne(
                 {"external_id": entity.external_id},
-                {"$set": doc},
+                {"$set": docs[i]},
                 upsert=True,
             )
         )
@@ -6245,23 +6931,13 @@ async def _invalidate_cache(sport_name: str) -> None:
 # ═══════════════════════════════════════════════
 
 
+@distributed_lock("lock:ingestion:seed_historical", timeout=1800)
 async def seed_historical_data() -> None:
-    """data/ klasorundeki CSV dosyalarini MongoDB'ye yukler.
-
-    Sadece henuz yuklenmemis verileri ekler (upsert).
-    Uygulama basladiginda otomatik calisir.
-    Manuel olarak da load_local.py ile tetiklenebilir.
-    """
+    """data/ klasorundeki CSV dosyalarini MongoDB'ye yukler."""
     import csv as csv_module
-
-    redis = redis_manager.get_client()
-    lock = redis.lock("lock:ingestion:seed_historical", timeout=600, blocking_timeout=1)
+    import aiofiles
+    import io
     
-    acquired = await lock.acquire()
-    if not acquired:
-        logger.info("Tarihsel veri yukleme gorevi zaten calisiyor. Atlaniyor.")
-        return
-
     try:
         logger.info("═══ TARIHSEL VERI YUKLEME BASLADI ═══")
 
@@ -6284,9 +6960,15 @@ async def seed_historical_data() -> None:
             league_code = filename.split("_")[0].split(".")[0]
 
             try:
-                with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
-                    reader = csv_module.DictReader(f)
-                    rows = list(reader)
+                # Faz 6 Fix: Asenkron dosya okuma ve Senkron parsing thread'e alindi
+                async with aiofiles.open(csv_path, mode="r", encoding="utf-8", errors="ignore") as f:
+                    content = await f.read()
+                
+                def _parse_csv(data: str):
+                    reader = csv_module.DictReader(io.StringIO(data))
+                    return list(reader)
+                
+                rows = await asyncio.to_thread(_parse_csv, content)
 
                 if not rows:
                     continue
@@ -6303,11 +6985,9 @@ async def seed_historical_data() -> None:
         # Cache temizle
         await _invalidate_cache("football")
         logger.info("═══ TARIHSEL VERI YUKLEME TAMAMLANDI: %d mac ═══", total_count)
-    finally:
-        try:
-            await lock.release()
-        except Exception:
-            pass
+    except Exception as exc:
+        logger.error("Tarihsel veri yukleme hatasi: %s", exc)
+        raise
 
 
 --- DOSYA: tasks\scheduler.py ---
@@ -7038,91 +7718,69 @@ class TestRateLimiter:
 
 
 --- DOSYA: utils\cache.py ---
-"""Redis onbellekleme decorator'u.
-
-Service katmanindaki okuma metodlarini (GET) hizlandirmak icin kullanilir.
-"""
-
-import functools
-import hashlib
-import inspect
-import logging
+"""Redis caching utility (Faz 4)."""
 
 import orjson
-
-from pydantic import TypeAdapter
-
+from functools import wraps
+from typing import Any, Callable
 from core.redis_client import redis_manager
+from core.logger import logger
 
-logger = logging.getLogger(__name__)
+from pydantic_core import to_jsonable_python
 
+def _make_serializable(data: Any) -> Any:
+    """pydantic_core kullanarak veriyi JSON uyumlu hale getirir (Yuksek performans)."""
+    try:
+        # Faz 6 Fix: orjson + pydantic_core kombinasyonu ile en hizli serilestirme
+        return to_jsonable_python(data)
+    except Exception:
+        return data
 
-def cache_response(ttl_seconds: int = 3600, prefix: str = "cache"):
-    """Metod ciktisini Redis uzerinde onbellege alir.
-
-    Serilestirme icin `orjson` kullanir (Pydantic modelleriyle uyumlu, standart json'dan hizli).
-    Eger Redis baglantisinda sorun varsa sessizce bypass eder ve orijinal metodu calistirir.
-
-    Args:
-        ttl_seconds: Cache yasam suresi (saniye).
-        prefix: Redis key on eki.
+def cache_response(expire: int = 300, key_prefix: str = "cache"):
     """
-    def decorator(func):
-        return_type = inspect.signature(func).return_annotation
-        type_adapter = TypeAdapter(return_type) if return_type is not inspect.Signature.empty else None
-
-        @functools.wraps(func)
+    Decorator to cache FastAPI endpoint responses in Redis.
+    Default expiry: 5 minutes.
+    """
+    def decorator(func: Callable):
+        @wraps(func)
         async def wrapper(*args, **kwargs):
-            # Key uretimi: prefix:func_name:hash(args+kwargs)
-            # args[0] genelde 'self' (Service instance) oldugu icin hash'e dahil etmeyiz
-            call_args = inspect.getcallargs(func, *args, **kwargs)
-            call_args.pop("self", None)
+            # Generate a unique key based on function name and arguments
+            key_parts = [key_prefix, func.__name__]
+            for k, v in sorted(kwargs.items()):
+                if k == "current_user" and hasattr(v, "tier"):
+                    key_parts.append(f"tier:{v.tier}")
+                elif k not in ["auth_service", "current_user", "db", "service"]:
+                    key_parts.append(f"{k}:{v}")
+            
+            cache_key = ":".join(key_parts)
+            redis = redis_manager.get_client()
 
-            # Argumanlari string'e cevirip hash'le
-            args_str = orjson.dumps(call_args, option=orjson.OPT_SORT_KEYS).decode("utf-8")
-            args_hash = hashlib.md5(args_str.encode("utf-8")).hexdigest()
-
-            cache_key = f"{prefix}:{func.__name__}:{args_hash}"
-
-            redis = None
             try:
-                redis = redis_manager.get_client()
-                cached_data = await redis.get(cache_key)
+                # Check cache
+                cached_val = await redis.get(cache_key)
+                if cached_val:
+                    logger.debug(f"Cache hit: {cache_key}")
+                    return orjson.loads(cached_val)
+            except Exception as e:
+                logger.error(f"Cache read error: {str(e)}")
 
-                if cached_data:
-                    # Cache HIT
-                    parsed = orjson.loads(cached_data)
-                    if type_adapter:
-                        return type_adapter.validate_python(parsed)
-                    return parsed
-
-            except Exception as exc:
-                logger.warning("Redis cache okuma hatasi (%s): %s", cache_key, exc)
-
-            # Cache MISS veya Redis hatasi — orijinal metodu cagir
+            # Execute function
             result = await func(*args, **kwargs)
 
-            # Pydantic objelerini veya liste objelerini serialize etmek icin dict'e cevir
-            # Eger sonuc listeyse her bir elemani model_dump yap (Pydantic)
-            serializable_result = result
-            if isinstance(result, list):
-                serializable_result = [
-                    item.model_dump() if hasattr(item, "model_dump") else item
-                    for item in result
-                ]
-            elif hasattr(result, "model_dump"):
-                serializable_result = result.model_dump()
-
-            # Redis'e yaz
-            if redis and result is not None:
-                try:
-                    serialized_data = orjson.dumps(serializable_result)
-                    await redis.setex(cache_key, ttl_seconds, serialized_data)
-                except Exception as exc:
-                    logger.warning("Redis cache yazma hatasi (%s): %s", cache_key, exc)
+            try:
+                # Faz 6 Fix: orjson.dumps kullanildi (json.dumps'tan cok daha hizli)
+                serializable_result = _make_serializable(result)
+                
+                await redis.setex(
+                    cache_key,
+                    expire,
+                    orjson.dumps(serializable_result).decode("utf-8")
+                )
+                logger.debug(f"Cache stored: {cache_key}")
+            except Exception as e:
+                logger.error(f"Cache write error: {str(e)}")
 
             return result
-
         return wrapper
     return decorator
 
@@ -7146,7 +7804,7 @@ from services.auth_service import AuthService
 from services.match_service import MatchService
 from schemas.auth import UserInDB, UserTier
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
 async def get_user_repo() -> UserRepository:
@@ -7173,17 +7831,27 @@ async def get_analysis_service(repo: MatchRepository = Depends(get_match_repo)) 
 
 async def get_current_user(
     request: Request,
-    token: Annotated[str, Depends(oauth2_scheme)],
     auth_service: AuthService = Depends(get_auth_service),
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> UserInDB:
     """Gecerli kullaniciyi dondurur, ayni zamanda Request.state uzerine yazar."""
+    token = request.cookies.get("access_token")
+    
+    # Fallback to Authorization header if needed (optional, but good for API tools)
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Gecersiz kimlik dogrulama bilgileri",
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    if not token:
+        raise credentials_exception
+
     token_data = auth_service.decode_token(token)
     if token_data is None:
         raise credentials_exception
@@ -7204,9 +7872,11 @@ async def get_current_active_user(
     current_user: UserInDB = Depends(get_current_user)
 ) -> UserInDB:
     """Dogrulanmis ve aktif bir kullanici mi diye kontrol eder (Email verify vs.)."""
-    # Eger email dogrulamasi kati kuralsa:
-    # if not current_user.is_verified:
-    #     raise HTTPException(status_code=400, detail="Kullanici dogrulanmamis")
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Bu işlem için e-posta adresinizi doğrulamanız gerekmektedir."
+        )
     return current_user
 
 
@@ -7231,52 +7901,152 @@ async def require_admin(current_user: UserInDB = Depends(get_current_user)) -> U
 
 
 --- DOSYA: utils\exceptions.py ---
-"""Ozel hata (exception) siniflari ve handler'lar."""
+"""Standardized exception classes and handlers for global error management (Faz 3)."""
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from core.config import settings
-
+from core.logger import logger
 
 class AppException(Exception):
-    """Uygulama bazli ozel hata sinifi."""
-    def __init__(self, status_code: int, detail: str, error_code: str = "INTERNAL_ERROR"):
+    """Custom application exception."""
+    def __init__(self, status_code: int, message: str, detail: any = None, error_code: str = "BUSINESS_LOGIC_ERROR"):
         self.status_code = status_code
+        self.message = message
         self.detail = detail
         self.error_code = error_code
 
+def get_cors_headers(request: Request):
+    """Helper to get CORS headers for error responses."""
+    origin = request.headers.get("origin")
+    headers = {}
+    if origin in settings.ALLOWED_ORIGINS:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+    return headers
 
 async def app_exception_handler(request: Request, exc: AppException):
-    """AppException firlatildiginda temiz JSON doner."""
-    origin = request.headers.get("origin")
-    headers = {}
-    if origin in settings.ALLOWED_ORIGINS or "*" in settings.ALLOWED_ORIGINS:
-        headers["Access-Control-Allow-Origin"] = origin or "*"
-        headers["Access-Control-Allow-Credentials"] = "true"
-
+    """Handles AppException by returning a standardized JSON response."""
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": exc.error_code, "detail": exc.detail},
-        headers=headers
+        content={
+            "error_code": exc.error_code,
+            "message": exc.message,
+            "detail": exc.detail
+        },
+        headers=get_cors_headers(request)
     )
 
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handles Pydantic validation errors."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error_code": "VALIDATION_ERROR",
+            "message": "Input validation failed.",
+            "detail": exc.errors()
+        },
+        headers=get_cors_headers(request)
+    )
+
+import httpx
+import traceback
+
+async def send_telegram_alert(message: str):
+    """Sends a notification to Telegram if configured."""
+    if not settings.TELEGRAM_BOT_TOKEN or not settings.TELEGRAM_CHAT_ID:
+        return
+    
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": settings.TELEGRAM_CHAT_ID,
+        "text": f"🚨 *CRITICAL ERROR* 🚨\n\n{message}",
+        "parse_mode": "Markdown"
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(url, json=payload)
+    except Exception as e:
+        logger.error(f"Failed to send Telegram alert: {str(e)}")
 
 async def global_exception_handler(request: Request, exc: Exception):
-    """Unhandled tum hatalari yakalar, detayli traceback gizler."""
-    import logging
-    logging.getLogger(__name__).error("Unhandled exception: %s", exc, exc_info=True)
+    """Catches all unhandled exceptions, logs to stdout (Loki), and alerts via Telegram."""
+    error_msg = str(exc)
+    stack_trace = traceback.format_exc()
     
-    origin = request.headers.get("origin")
-    headers = {}
-    if origin in settings.ALLOWED_ORIGINS or "*" in settings.ALLOWED_ORIGINS:
-        headers["Access-Control-Allow-Origin"] = origin or "*"
-        headers["Access-Control-Allow-Credentials"] = "true"
-
+    # Structure the log for Loki
+    logger.error(
+        f"Unhandled exception on {request.url.path}: {error_msg}",
+        extra={
+            "extra_fields": {
+                "url": str(request.url),
+                "method": request.method,
+                "error": error_msg,
+                "traceback": stack_trace
+            }
+        },
+        exc_info=True
+    )
+    
+    # Send Telegram alert for production critical errors
+    if settings.ENVIRONMENT == "production":
+        alert_text = (
+            f"*Endpoint:* {request.method} {request.url.path}\n"
+            f"*Error:* {error_msg}\n"
+            f"*Traceback:* ```{stack_trace[:300]}...```" # Truncate to avoid limit
+        )
+        await send_telegram_alert(alert_text)
+    
     return JSONResponse(
         status_code=500,
-        content={"error": "INTERNAL_SERVER_ERROR", "detail": "An unexpected error occurred."},
-        headers=headers
+        content={
+            "error_code": "INTERNAL_SERVER_ERROR",
+            "message": "An unexpected error occurred. Our team has been notified via Telegram.",
+            "detail": None
+        },
+        headers=get_cors_headers(request)
     )
+
+
+--- DOSYA: utils\lock.py ---
+import functools
+import logging
+from typing import Any, Callable
+from core.redis_client import redis_manager
+
+logger = logging.getLogger(__name__)
+
+def distributed_lock(lock_key: str, timeout: int = 600, blocking_timeout: int = 1):
+    """Redis tabanli dagitik kilit dekoratörü (Faz 6 Fix: Merkezi kilit yönetimi)."""
+    def decorator(func: Callable):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            redis = redis_manager.get_client()
+            lock = redis.lock(lock_key, timeout=timeout, blocking_timeout=blocking_timeout)
+            
+            acquired = False
+            try:
+                acquired = await lock.acquire()
+                if not acquired:
+                    logger.warning(f"Lock alinamadi: {lock_key}. Gorev zaten calisiyor olabilir.")
+                    return None
+                
+                logger.info(f"Lock alindi: {lock_key}")
+                return await func(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Lock hatasi ({lock_key}): {e}")
+                raise
+            finally:
+                if acquired:
+                    try:
+                        await lock.release()
+                        logger.info(f"Lock serbest birakildi: {lock_key}")
+                    except Exception:
+                        pass
+        return wrapper
+    return decorator
 
 
 --- DOSYA: utils\__init__.py ---

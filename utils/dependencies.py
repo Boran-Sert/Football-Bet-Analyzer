@@ -16,7 +16,7 @@ from services.auth_service import AuthService
 from services.match_service import MatchService
 from schemas.auth import UserInDB, UserTier
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
 async def get_user_repo() -> UserRepository:
@@ -43,17 +43,27 @@ async def get_analysis_service(repo: MatchRepository = Depends(get_match_repo)) 
 
 async def get_current_user(
     request: Request,
-    token: Annotated[str, Depends(oauth2_scheme)],
     auth_service: AuthService = Depends(get_auth_service),
     user_repo: UserRepository = Depends(get_user_repo),
 ) -> UserInDB:
     """Gecerli kullaniciyi dondurur, ayni zamanda Request.state uzerine yazar."""
+    token = request.cookies.get("access_token")
+    
+    # Fallback to Authorization header if needed (optional, but good for API tools)
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Gecersiz kimlik dogrulama bilgileri",
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    if not token:
+        raise credentials_exception
+
     token_data = auth_service.decode_token(token)
     if token_data is None:
         raise credentials_exception
@@ -74,9 +84,11 @@ async def get_current_active_user(
     current_user: UserInDB = Depends(get_current_user)
 ) -> UserInDB:
     """Dogrulanmis ve aktif bir kullanici mi diye kontrol eder (Email verify vs.)."""
-    # Eger email dogrulamasi kati kuralsa:
-    # if not current_user.is_verified:
-    #     raise HTTPException(status_code=400, detail="Kullanici dogrulanmamis")
+    if not current_user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Bu işlem için e-posta adresinizi doğrulamanız gerekmektedir."
+        )
     return current_user
 
 

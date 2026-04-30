@@ -9,8 +9,6 @@ from core.database import mongo
 from repositories.user_repository import UserRepository
 from schemas.auth import UserInDB, UserTier
 from services.billing_service import BillingService
-from services.payment.iyzico_provider import IyzicoProvider
-from services.payment.stripe_provider import StripeProvider
 from utils.dependencies import get_current_active_user
 
 logger = logging.getLogger(__name__)
@@ -20,11 +18,14 @@ router = APIRouter(prefix="/api/v1/billing", tags=["Billing"])
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
+from services.payment.factory import PaymentProviderFactory
+
 async def get_billing_service() -> BillingService:
     db = mongo.get_db()
-    # Varsayilan olarak Iyzico kullaniyoruz. 
-    # Ileride settings'den provider seçilebilir: settings.PAYMENT_PROVIDER
-    provider = IyzicoProvider() 
+    
+    # Faz 6 Fix: Strategy Pattern Factory kullanimi
+    provider = PaymentProviderFactory.get_provider(settings.PAYMENT_PROVIDER)
+        
     return BillingService(user_repo=UserRepository(db), provider=provider)
 
 
@@ -139,16 +140,54 @@ async def billing_webhook(
 
     headers = request.headers
     
-    success = await billing_service.handle_webhook(payload, headers)
+    # Idempotency Kontrolü (Faz 5 Fix: Provider-Specific Unique ID + Atomic SET NX)
+    # Iyzico 'token' veya 'paymentId' gönderir. Stripe 'id' (event id) gönderir.
+    unique_id = (
+        payload.get("token") or 
+        payload.get("paymentId") or 
+        payload.get("id") or 
+        headers.get("X-Idempotency-Key")
+    )
     
-    if success:
-        # Odeme basariliysa giris sayfasina yonlendir (veya dashboard)
-        return RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/login?payment=success", 
-            status_code=303
-        )
+    if unique_id:
+        from core.redis_client import redis_manager
+        redis = redis_manager.get_client()
+        lock_key = f"idempotency:billing:{unique_id}"
+        
+        # Atomic SET NX: Sadece anahtar yoksa yaz ve True dön. (Race condition engellenir)
+        is_new = await redis.set(lock_key, "processing", ex=300, nx=True) # Başlangıçta 5 dk kilit
+        if not is_new:
+            current_status = await redis.get(lock_key)
+            if current_status == "processing":
+                logger.warning("Webhook hala isleniyor (409): %s", unique_id)
+                raise HTTPException(status_code=409, detail="Payment is currently being processed. Please try again later.")
+            
+            logger.info("Mükerrer webhook isteği engellendi (Already processed): %s", unique_id)
+            return {"status": "already_processed"}
+
+    try:
+        success = await billing_service.handle_webhook(payload, headers)
+        
+        if success:
+            if unique_id:
+                # İşlem başarılıysa kilidi 24 saate uzat (artık 'processed')
+                await redis.setex(lock_key, 86400, "processed")
+            
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?payment=success", 
+                status_code=303
+            )
+        else:
+            # İşlem başarısızsa kilidi kaldır (retry için)
+            if unique_id:
+                await redis.delete(lock_key)
+    except Exception as e:
+        logger.error("Webhook işleme hatası: %s", str(e))
+        if unique_id:
+            await redis.delete(lock_key)
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
     
-    # Basarisizsa planlar sayfasina hata ile don
+    # Başarısızsa planlar sayfasina hata ile don
     return RedirectResponse(
         url=f"{settings.FRONTEND_URL}/pricing?error=payment_failed", 
         status_code=303

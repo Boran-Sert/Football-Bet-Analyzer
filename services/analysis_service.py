@@ -11,6 +11,8 @@ Yeni yaklasim:
 """
 
 import logging
+import math
+import asyncio
 from pydantic import BaseModel
 
 from core.config import TierLimits
@@ -106,60 +108,55 @@ class AnalysisService:
         away: float,
         limit: int,
     ) -> list[SimilarMatchResult]:
-        """MongoDB aggregation pipeline ile Euclidean mesafeyi DB'de hesaplar."""
+        """Kabaca filtrelenmis veriyi DB'den ceker, mesafeyi Python'da hesaplar (Faz 6 Fix)."""
+        
+        # 1. MongoDB'den sadece kabaca filtrelenmis veriyi cek (İndeksli alanlar üzerinden)
+        # Bu sayede DB tarafında COLLSCAN ve In-Memory Sort engellenir.
         pipeline = [
-            # 1. Sadece tamamlanmis maclar
             {"$match": {"status": "completed"}},
-            # 2. h2h odds mevcut olanlar
             {
                 "$match": {
-                    "odds.h2h.home": {"$exists": True, "$ne": None},
-                    "odds.h2h.draw": {"$exists": True, "$ne": None},
-                    "odds.h2h.away": {"$exists": True, "$ne": None},
+                    "odds.h2h.home": {"$gte": home - 1.0, "$lte": home + 1.0},
+                    "odds.h2h.draw": {"$gte": draw - 1.0, "$lte": draw + 1.0},
+                    "odds.h2h.away": {"$gte": away - 1.0, "$lte": away + 1.0},
                 }
             },
-            # 3. Euclidean mesafeyi hesapla
-            {
-                "$addFields": {
-                    "distance": {
-                        "$sqrt": {
-                            "$add": [
-                                {"$pow": [{"$subtract": ["$odds.h2h.home", home]}, 2]},
-                                {"$pow": [{"$subtract": ["$odds.h2h.draw", draw]}, 2]},
-                                {"$pow": [{"$subtract": ["$odds.h2h.away", away]}, 2]},
-                            ]
-                        }
-                    }
-                }
-            },
-            # 4. Sadece DISTANCE_THRESHOLD altindakileri al
-            {"$match": {"distance": {"$lt": DISTANCE_THRESHOLD}}},
-            # 5. En yakin once sirala
-            {"$sort": {"distance": 1}},
-            # 6. Sadece ihtiyac kadar cek
-            {"$limit": limit},
+            # Bellek dostu limit: Cok fazla veri gelirse bile hard cap koy (Ornegin 2000)
+            {"$limit": 2000}
         ]
 
         db = self.repo.collection.database
         cursor = db.matches.aggregate(pipeline)
-        docs = await cursor.to_list(length=limit)
+        docs = await cursor.to_list(length=2000)
 
-        results: list[SimilarMatchResult] = []
-        for doc in docs:
-            try:
-                distance = float(doc.get("distance", 999))
-                sim_pct = max(0.0, 100.0 - (distance * 33.3))
-                results.append(
-                    SimilarMatchResult(
-                        match=MatchInDB(
-                            **{k: v for k, v in doc.items() if k != "distance"}
-                        ),
-                        distance=round(distance, 4),
-                        similarity_percentage=round(sim_pct, 1),
+        def process_docs(docs_list):
+            results_local = []
+            for doc in docs_list:
+                try:
+                    h = doc["odds"]["h2h"]["home"]
+                    d = doc["odds"]["h2h"]["draw"]
+                    a = doc["odds"]["h2h"]["away"]
+                    
+                    # Euclidean mesafe (Python tarafında)
+                    dist = math.sqrt(
+                        (h - home)**2 + (d - draw)**2 + (a - away)**2
                     )
-                )
-            except Exception as exc:
-                logger.warning("Aggregation doc parse hatasi: %s", exc)
-                continue
+                    
+                    if dist < DISTANCE_THRESHOLD:
+                        sim_pct = max(0.0, 100.0 - (dist * 33.3))
+                        results_local.append(
+                            SimilarMatchResult(
+                                match=MatchInDB(**doc),
+                                distance=round(dist, 4),
+                                similarity_percentage=round(sim_pct, 1),
+                            )
+                        )
+                except Exception:
+                    continue
+            
+            # Python tarafında sıralama (MongoDB In-memory sort limit sorunu yok)
+            results_local.sort(key=lambda x: x.distance)
+            return results_local[:limit]
 
-        return results
+        # Agır CPU islemi (2000 objenin traverse edilmesi) oldugu icin thread'e aliyoruz
+        return await asyncio.to_thread(process_docs, docs)

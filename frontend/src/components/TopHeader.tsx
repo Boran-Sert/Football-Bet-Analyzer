@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { API_URL } from "@/config/constants";
 
 export default function TopHeader() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -10,30 +11,25 @@ export default function TopHeader() {
   const router = useRouter();
 
   const fetchUser = async () => {
-    const token = localStorage.getItem("token");
-    if (!token) {
-      setIsLoggedIn(false);
-      setUserData(null);
-      return;
-    }
-    setIsLoggedIn(true);
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/v1/auth/me", {
-        headers: { "Authorization": `Bearer ${token}` }
+      const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+        credentials: "include"
       });
       if (res.ok) {
+        setIsLoggedIn(true);
         const data = await res.json();
         setUserData({
           name: data.display_name,
           tier: data.tier
         });
-      } else if (res.status === 401) {
-        localStorage.removeItem("token");
+      } else {
         setIsLoggedIn(false);
         setUserData(null);
       }
     } catch (err) {
       console.error(err);
+      setIsLoggedIn(false);
+      setUserData(null);
     }
   };
 
@@ -43,8 +39,17 @@ export default function TopHeader() {
     return () => window.removeEventListener("auth-change", fetchUser);
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem("token");
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_URL}/api/v1/auth/logout`, { 
+        method: "POST",
+        credentials: "include"
+      });
+    } catch (err) {
+      console.error("Logout error:", err);
+    }
+    setIsLoggedIn(false);
+    setUserData(null);
     window.dispatchEvent(new Event('auth-change'));
     router.push("/login");
   };

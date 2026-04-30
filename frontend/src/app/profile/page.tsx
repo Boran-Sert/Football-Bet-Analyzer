@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { API_URL } from "@/config/constants";
 
 export default function ProfilePage() {
   const [userData, setUserData] = useState<any>(null);
@@ -17,13 +18,8 @@ export default function ProfilePage() {
   useEffect(() => {
     const fetchProfile = async () => {
       try {
-        const token = localStorage.getItem("token");
-        if (!token) {
-          router.push("/login");
-          return;
-        }
-        const res = await fetch("http://127.0.0.1:8000/api/v1/auth/me", {
-          headers: { "Authorization": `Bearer ${token}` }
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
         });
         if (res.ok) {
           const data = await res.json();
@@ -52,13 +48,12 @@ export default function ProfilePage() {
 
     setSubmitting(true);
     try {
-      const token = localStorage.getItem("token");
-      const res = await fetch("http://127.0.0.1:8000/api/v1/auth/change-password", {
+      const res = await fetch(`${API_URL}/api/v1/auth/change-password`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
         },
+        credentials: "include",
         body: JSON.stringify({
           current_password: passwordData.current_password,
           new_password: passwordData.new_password
@@ -86,13 +81,12 @@ export default function ProfilePage() {
     setSubmittingEmail(true);
 
     try {
-      const token = localStorage.getItem("token");
-      const res = await fetch("http://127.0.0.1:8000/api/v1/auth/request-email-change", {
+      const res = await fetch(`${API_URL}/api/v1/auth/request-email-change`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
         },
+        credentials: "include",
         body: JSON.stringify({ new_email: newEmail })
       });
 

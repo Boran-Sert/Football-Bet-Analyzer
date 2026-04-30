@@ -78,3 +78,11 @@ class UserRepository:
             return result.modified_count > 0
         except Exception:
             return False
+
+    async def delete(self, user_id: str) -> bool:
+        """Kullanici kaydini kalici olarak siler (KVKK/GDPR)."""
+        try:
+            result = await self.collection.delete_one({"_id": ObjectId(user_id)})
+            return result.deleted_count > 0
+        except Exception:
+            return False

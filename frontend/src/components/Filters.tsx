@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_URL } from "@/config/constants";
 
 interface FiltersProps {
   onLeagueChange: (val: string) => void;
@@ -28,7 +29,9 @@ export default function Filters({ onLeagueChange }: FiltersProps) {
   useEffect(() => {
     const fetchLeagues = async () => {
       try {
-        const res = await fetch("http://127.0.0.1:8000/api/v1/football/matches/leagues");
+        const res = await fetch(`${API_URL}/api/v1/football/matches/leagues`, {
+          credentials: "include"
+        });
         if (res.ok) {
           const data = await res.json();
           // Sadece tanımlı olduğumuz ve veri çektiğimiz ligleri göster

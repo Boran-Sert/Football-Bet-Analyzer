@@ -98,3 +98,9 @@ class PasswordChangeRequest(BaseModel):
 class EmailChangeRequest(BaseModel):
     """Email degistirme isteği."""
     new_email: EmailStr
+
+# ── Account Deletion (GDPR) ───────────────────────────────────────────────────
+
+class AccountDeleteRequest(BaseModel):
+    """Hesap silme isteği."""
+    password: str

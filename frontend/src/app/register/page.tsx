@@ -3,6 +3,7 @@
 import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import { API_URL } from "@/config/constants";
 
 function RegisterContent() {
   const [formData, setFormData] = useState({ display_name: "", email: "", password: "" });
@@ -24,7 +25,7 @@ function RegisterContent() {
     setLoading(true);
     try {
       // Guest Checkout: Kayıt ve Ödeme birlikte
-      const response = await fetch("http://127.0.0.1:8000/api/v1/billing/guest-checkout", {
+      const response = await fetch(`${API_URL}/api/v1/billing/guest-checkout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

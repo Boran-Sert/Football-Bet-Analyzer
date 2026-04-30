@@ -1,10 +1,12 @@
 """Kimlik dogrulama is mantigi ve JWT islemleri."""
 
+import asyncio
 import secrets
 from datetime import datetime, timedelta
 
 from passlib.context import CryptContext
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import PyJWTError
 
 from core.config import settings
 from core.redis_client import redis_manager
@@ -22,19 +24,27 @@ class AuthService:
 
     # ── Password ──────────────────────────────────────────────────────────────
 
-    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        return pwd_context.verify(plain_password, hashed_password)
+    async def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        # Faz 6 Fix: CPU-bound bcrypt islemi event loop'u kilitlememesi icin thread'e alindi
+        return await asyncio.to_thread(pwd_context.verify, plain_password, hashed_password)
 
-    def get_password_hash(self, password: str) -> str:
-        return pwd_context.hash(password)
+    async def get_password_hash(self, password: str) -> str:
+        # Faz 6 Fix: CPU-bound bcrypt islemi event loop'u kilitlememesi icin thread'e alindi
+        return await asyncio.to_thread(pwd_context.hash, password)
 
     async def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
         user = await self.repo.get_by_id(user_id)
-        if not user or not self.verify_password(current_password, user.hashed_password):
+        if not user or not await self.verify_password(current_password, user.hashed_password):
             return False
         
-        new_hash = self.get_password_hash(new_password)
-        return await self.repo.update_password(user_id, new_hash)
+        new_hash = await self.get_password_hash(new_password)
+        updated = await self.repo.update_password(user_id, new_hash)
+        
+        if updated:
+            # Faz 6 Fix: Sifre degistiginde tum aktif oturumlari (refresh token) iptal et
+            await self.revoke_all_user_tokens(user_id)
+            
+        return updated
 
     # ── Brute Force Protection ───────────────────────────────────────────────
 
@@ -90,7 +100,7 @@ class AuthService:
                 is_superuser=is_superuser,
                 exp=datetime.utcfromtimestamp(payload["exp"]) if payload.get("exp") else None,
             )
-        except JWTError:
+        except PyJWTError:
             return None
 
     # ── Refresh token (revocable) ─────────────────────────────────────────────
@@ -115,6 +125,21 @@ class AuthService:
 
         redis = redis_manager.get_client()
         await redis.setex(f"refresh_token:{jti}", expire_seconds, user_id)
+        
+        # Faz 6 Fix: Bellek sızıntısı engellendi (ZSET + Expiry Score)
+        # Score = timestamp of expiration
+        exp_timestamp = int(datetime.utcnow().timestamp()) + expire_seconds
+        set_key = f"user_tokens:{user_id}"
+        
+        async with redis.pipeline(transaction=True) as pipe:
+            # 1. Yeni token'i ekle
+            pipe.zadd(set_key, {jti: exp_timestamp})
+            # 2. Suresi dolmus olanlari temizle (Memory leak fix)
+            pipe.zremrangebyscore(set_key, "-inf", int(datetime.utcnow().timestamp()))
+            # 3. Set'in kendisi de bir noktada silinsin
+            pipe.expire(set_key, expire_seconds)
+            await pipe.execute()
+        
         return token
 
     async def verify_refresh_token(self, token: str) -> TokenData | None:
@@ -141,7 +166,7 @@ class AuthService:
                 tier=UserTier(tier_str),
                 is_superuser=payload.get("is_superuser", False),
             )
-        except JWTError:
+        except PyJWTError:
             return None
 
     async def revoke_refresh_token(self, token: str) -> bool:
@@ -154,13 +179,34 @@ class AuthService:
                 options={"verify_exp": False},  # Suresi dolmus token'lari da iptal et
             )
             jti = payload.get("jti")
+            user_id = payload.get("sub")
             if not jti:
                 return False
             redis = redis_manager.get_client()
             await redis.delete(f"refresh_token:{jti}")
+            if user_id:
+                await redis.zrem(f"user_tokens:{user_id}", jti)
             return True
-        except JWTError:
+        except PyJWTError:
             return False
+
+    async def revoke_all_user_tokens(self, user_id: str) -> None:
+        """Kullanicinin tum aktif refresh token'larini iptal eder (O(1) performans)."""
+        redis = redis_manager.get_client()
+        set_key = f"user_tokens:{user_id}"
+        
+        # 1. Tum JTI'lari al (ZSET versiyonu)
+        jtis = await redis.zrange(set_key, 0, -1)
+        if not jtis:
+            return
+            
+        # 2. Refresh token'lari sil
+        async with redis.pipeline(transaction=True) as pipe:
+            for jti in jtis:
+                pipe.delete(f"refresh_token:{jti}")
+            # 3. Set'i sil
+            pipe.delete(set_key)
+            await pipe.execute()
 
     # ── Email verification ────────────────────────────────────────────────────
 
@@ -180,7 +226,7 @@ class AuthService:
             if not user:
                 return False
             return await self.repo.verify_user(user.id)
-        except JWTError:
+        except PyJWTError:
             return False
 
     # ── Email change ──────────────────────────────────────────────────────────
@@ -211,7 +257,7 @@ class AuthService:
                 return False
                 
             return await self.repo.update_email(user_id, new_email)
-        except JWTError:
+        except PyJWTError:
             return False
 
     # ── Password reset ────────────────────────────────────────────────────────
@@ -233,9 +279,9 @@ class AuthService:
             user = await self.repo.get_by_email(email)
             if not user:
                 return False
-            new_hash = self.get_password_hash(new_password)
+            new_hash = await self.get_password_hash(new_password)
             return await self.repo.update_password(user.id, new_hash)
-        except JWTError:
+        except PyJWTError:
             return False
 
     # ── Register / Login ──────────────────────────────────────────────────────
@@ -244,7 +290,7 @@ class AuthService:
         existing = await self.repo.get_by_email(user_in.email)
         if existing:
             return None
-        hashed_password = self.get_password_hash(user_in.password)
+        hashed_password = await self.get_password_hash(user_in.password)
         new_user = UserInDB(
             email=user_in.email,
             display_name=user_in.display_name,
@@ -254,3 +300,11 @@ class AuthService:
             is_superuser=False,
         )
         return await self.repo.create(new_user)
+
+    async def delete_account(self, user_id: str, password: str) -> bool:
+        """Kullanici hesabini siler ve tum bagli verileri temizler."""
+        user = await self.repo.get_by_id(user_id)
+        if not user or not await self.verify_password(password, user.hashed_password):
+            return False
+        
+        return await self.repo.delete(user_id)

@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "football-bet-analyzer"
+version = "0.3.0"
+description = "Canli oran analiz sistemi backend servisi."
+authors = ["Boran Sert"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.110.0"
+uvicorn = {extras = ["standard"], version = "^0.29.0"}
+motor = "^3.3.2"
+redis = "^5.0.3"
+pydantic-settings = "^2.2.1"
+pydantic = {extras = ["email"], version = "^2.6.4"}
+apscheduler = "^3.10.4"
+httpx = "^0.27.0"
+passlib = {extras = ["bcrypt"], version = "^1.7.4"}
+bcrypt = "3.1.7"
+python-multipart = "^0.0.9"
+orjson = "^3.9.15"
+aiofiles = "^23.2.1"
+PyJWT = "^2.8.0"
+stripe = "^8.5.0"
+iyzipay = "^1.0.43"
+prometheus-fastapi-instrumentator = "^7.0.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.1.1"
+pytest-asyncio = "^0.23.6"
+pytest-mock = "^3.14.0"
+ruff = "^0.3.4"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

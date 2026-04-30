@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import TopHeader from "@/components/TopHeader";
+import { API_URL } from "@/config/constants";
 
 export default function ClientLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -14,12 +15,27 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const isPublicPage = publicRoutes.includes(pathname);
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (!token && !isPublicPage) {
-      router.push("/login");
-    } else {
-      setIsAuthChecking(false);
-    }
+    const checkAuth = async () => {
+      if (isPublicPage) {
+        setIsAuthChecking(false);
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include"
+        });
+        if (res.ok) {
+          setIsAuthChecking(false);
+        } else {
+          router.push("/login");
+        }
+      } catch (err) {
+        router.push("/login");
+      }
+    };
+    
+    checkAuth();
   }, [pathname, isPublicPage, router]);
 
   if (isAuthChecking && !isPublicPage) {
