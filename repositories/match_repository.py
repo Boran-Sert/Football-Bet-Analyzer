@@ -7,7 +7,7 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
-
+from core.logger import logger
 from schemas.match import MatchEntity, MatchInDB, MatchStatus
 
 
@@ -85,8 +85,6 @@ class MatchRepository:
             "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
             "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0},
         }
-
-        from core.logger import logger
 
         logger.info(f"Benzerlik sorgusu baslatildi: H:{home} D:{draw} A:{away}")
 

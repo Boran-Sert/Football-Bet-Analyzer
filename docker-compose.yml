@@ -10,7 +10,10 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - ENVIRONMENT=production
+      - ENVIRONMENT=development
+    volumes:
+      - .:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       mongodb:
         condition: service_healthy # ← MongoDB HAZIR olana kadar bekle
