@@ -22,6 +22,7 @@ from clients.odds_api_client import OddsAPIClient
 from core.config import settings
 from core.database import mongo
 from core.redis_client import redis_manager
+from repositories.match_repository import MatchRepository
 from utils.lock import distributed_lock
 
 logger = logging.getLogger(__name__)
@@ -53,13 +54,14 @@ async def fetch_upcoming_matches() -> None:
 
         client = OddsAPIClient()
         db = mongo.get_db()
+        repo = MatchRepository(db)
 
         total_new = 0
         total_skipped = 0
 
         for league_key in settings.TARGET_LEAGUES:
             try:
-                new, skipped = await _fetch_league(client, adapter, db, league_key)
+                new, skipped = await _fetch_league(client, adapter, repo, league_key)
                 total_new += new
                 total_skipped += skipped
             except QuotaExhaustedError:
@@ -84,7 +86,7 @@ async def fetch_upcoming_matches() -> None:
 async def _fetch_league(
     client: OddsAPIClient,
     adapter: FootballAdapter,
-    db,
+    repo: MatchRepository,
     league_key: str,
 ) -> tuple[int, int]:
     """Tek bir lig icin yaklasan maclari ceker ve filtreler.
@@ -107,20 +109,28 @@ async def _fetch_league(
     if not entities:
         return (0, 0)
 
-    # Zaten guncel olanlari filtrele (kota optimizasyonu)
+    # Zaten guncel olanlari filtrele (Faz 6 Fix: N+1 engellendi)
+    all_ids = [e.external_id for e in entities]
+    
+    # Sınırsız $in sorgusu yerine chunking yapısı (Faz 6 Fix: MongoDB intiharini engelle)
+    chunk_size = 500
+    existing_docs = []
+    for i in range(0, len(all_ids), chunk_size):
+        chunk = all_ids[i:i + chunk_size]
+        docs = await repo.get_by_external_ids(chunk)
+        existing_docs.extend(docs)
+        
+    existing_map = {doc["external_id"]: doc.get("updated_at") for doc in existing_docs}
+
     freshness_cutoff = datetime.now(timezone.utc) - timedelta(hours=SKIP_IF_FRESH_HOURS)
     entities_to_upsert = []
     skipped = 0
 
     for entity in entities:
-        existing = await db.matches.find_one(
-            {"external_id": entity.external_id},
-            {"updated_at": 1}
-        )
+        existing_updated = existing_map.get(entity.external_id)
         
-        if existing:
-            existing_updated = existing.get("updated_at")
-            if existing_updated and existing_updated.replace(tzinfo=timezone.utc) > freshness_cutoff:
+        if existing_updated:
+            if existing_updated.replace(tzinfo=timezone.utc) > freshness_cutoff:
                 skipped += 1
                 continue
         
@@ -128,7 +138,7 @@ async def _fetch_league(
 
     # Upsert
     if entities_to_upsert:
-        await _upsert_to_db(entities_to_upsert)
+        await _upsert_to_db(repo, entities_to_upsert)
 
     logger.info(
         "Lig [%s]: %d yeni/guncellenen, %d atlanan.",
@@ -142,35 +152,20 @@ async def _fetch_league(
 # ═══════════════════════════════════════════════
 
 
-async def _upsert_to_db(entities: list) -> None:
-    """MatchEntity listesini MongoDB'ye toplu upsert yapar."""
-    from pymongo import UpdateOne
+async def _upsert_to_db(repo: MatchRepository, entities: list) -> None:
+    """MatchEntity listesini MatchRepository uzerinden toplu upsert yapar (Faz 6 Fix)."""
+    if not entities:
+        return
 
-    db = mongo.get_db()
-    operations = []
-
-    def _get_docs(entities_list):
-        return [e.model_dump() for e in entities_list]
-
-    # Faz 6 Fix: Pydantic model_dump (CPU-intensive) thread'e alindi
-    docs = await asyncio.to_thread(_get_docs, entities)
-
-    for i, entity in enumerate(entities):
-        operations.append(
-            UpdateOne(
-                {"external_id": entity.external_id},
-                {"$set": docs[i]},
-                upsert=True,
-            )
-        )
-
-    if operations:
-        result = await db.matches.bulk_write(operations, ordered=False)
-        logger.info(
-            "MongoDB upsert: %d eklendi, %d guncellendi.",
-            result.upserted_count,
-            result.modified_count,
-        )
+    # Faz 6 Fix: Bulk islemde Pydantic v2 pydantic-core kullandigi icin thread overhead'ine gerek yok.
+    # 50-100 maclik listeler icin context switch daha maliyetli.
+    result = await repo.bulk_upsert(entities)
+    
+    logger.info(
+        "MatchRepository upsert: %d eklendi, %d guncellendi.",
+        result["upserted"],
+        result["modified"],
+    )
 
 
 async def _invalidate_cache(sport_name: str) -> None:
@@ -237,7 +232,9 @@ async def seed_historical_data() -> None:
 
                 entities = adapter.normalize_historical(rows, league_code=league_code)
                 if entities:
-                    await _upsert_to_db(entities)
+                    db = mongo.get_db()
+                    repo = MatchRepository(db)
+                    await _upsert_to_db(repo, entities)
                     total_count += len(entities)
                     logger.info("CSV yuklendi: %s → %d mac.", filename, len(entities))
             except Exception as exc:

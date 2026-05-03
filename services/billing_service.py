@@ -1,6 +1,7 @@
 import json
 import uuid
 import logging
+import asyncio
 from typing import Any
 
 from core.pricing import PLANS
@@ -41,7 +42,7 @@ class BillingService:
         """Kayit olmayan kullanici icin odeme baslatir ve verileri gecici olarak saklar."""
         temp_id = f"guest_{uuid.uuid4().hex}"
         # Sifreyi hashleyip saklayalim
-        reg_data["hashed_password"] = pwd_context.hash(reg_data["password"])
+        reg_data["hashed_password"] = await asyncio.to_thread(pwd_context.hash, reg_data["password"])
         del reg_data["password"]
         
         await self.redis.setex(f"pending_reg:{temp_id}", 3600, json.dumps(reg_data))

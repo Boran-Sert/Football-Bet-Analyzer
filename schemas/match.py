@@ -9,7 +9,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, GetCoreSchemaHandler
+from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
 from pydantic_core import core_schema
 from bson import ObjectId
 
@@ -77,6 +77,27 @@ class MatchOdds(BaseModel):
     btts: BTTSOdds | None = None
 
     model_config = {"extra": "allow"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def wrap_h2h_odds(cls, data: Any) -> Any:
+        """Eski format (flat odds) verilerini yeni formata (nested h2h) tasir."""
+        # Eğer veri zaten bir MatchOdds nesnesiyse veya dict değilse güvenli kontrol
+        if not isinstance(data, dict):
+            if hasattr(data, "home") and hasattr(data, "draw") and getattr(data, "h2h", None) is None:
+                 return {"h2h": {"home": getattr(data, "home"), "draw": getattr(data, "draw"), "away": getattr(data, "away", None)}}
+            return data
+            
+        # Eğer h2h yoksa ama flat oranlar (home, draw, away) varsa, h2h içine taşı
+        if "h2h" not in data or data["h2h"] is None:
+            home = data.get("home")
+            draw = data.get("draw")
+            away = data.get("away")
+            
+            if home is not None and draw is not None and away is not None:
+                data["h2h"] = {"home": home, "draw": draw, "away": away}
+                
+        return data
 
 
 # ═══════════════════════════════════════════════
@@ -155,6 +176,7 @@ class MatchInDB(MatchEntity):
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
+        "extra": "ignore",
     }
 
 

@@ -27,7 +27,9 @@ class TierLimits:
 
     @classmethod
     def get_rate_limit(cls, tier: str) -> int:
-        return cls.rate_limit_per_minute.get(tier, cls.rate_limit_per_minute["standard"])
+        return cls.rate_limit_per_minute.get(
+            tier, cls.rate_limit_per_minute["standard"]
+        )
 
 
 class Settings(BaseSettings):
@@ -38,7 +40,8 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str = "development"
     PAYMENT_PROVIDER: str = "iyzico"
-    
+    REQUIRE_EMAIL_VERIFICATION: bool = True
+
     # Telegram Notifications (Faz 3 - Lightweight Alerting)
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None
@@ -64,13 +67,15 @@ class Settings(BaseSettings):
     # Get this from https://dashboard.stripe.com/webhooks
     STRIPE_WEBHOOK_SECRET: str = ""
     # Get these from https://dashboard.stripe.com/products (after creating products)
-    STRIPE_PRICE_PRO: str = ""    # e.g. price_1ABC...
+    STRIPE_PRICE_PRO: str = ""  # e.g. price_1ABC...
     STRIPE_PRICE_ELITE: str = ""  # e.g. price_1XYZ...
 
     # ── Iyzico (GAP 7) ──────────────────────────────────────────────────────
     IYZICO_API_KEY: str = ""
     IYZICO_SECRET_KEY: str = ""
-    IYZICO_BASE_URL: str = "sandbox-api.iyzipay.com"  # Iyzico SDK HTTPSConnection için protokol içermemeli
+    IYZICO_BASE_URL: str = (
+        "sandbox-api.iyzipay.com"  # Iyzico SDK HTTPSConnection için protokol içermemeli
+    )
 
     # ── Scheduler ──
     SCHEDULER_SLOTS: list[dict] = [
@@ -82,23 +87,38 @@ class Settings(BaseSettings):
     ACTIVE_SPORTS: list[str] = Field(default=["football"])
 
     # ── CORS ──
-    ALLOWED_ORIGINS: Any = Field(default=["http://localhost:3000", "http://127.0.0.1:3000"])
+    ALLOWED_ORIGINS: Any = Field(
+        default=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://100.82.212.6:3000",
+            "https://bet-analysis-fe.vercel.app",
+        ]
+    )
+
+    # ── Proxy / Security ──
+    TRUSTED_PROXIES: Any = Field(default=["127.0.0.1"])
 
     # ── Odds API ──
     ODDS_API_BASE_URL: str = "https://api.the-odds-api.com/v4"
     ODDS_API_REGIONS: str = "eu,uk"
     ODDS_API_MARKETS: str = "h2h,totals,btts"
     TARGET_LEAGUES: list[str] = [
-        "soccer_epl", "soccer_efl_champ",
-        "soccer_spain_la_liga", "soccer_spain_segunda_division",
-        "soccer_germany_bundesliga", "soccer_germany_bundesliga2",
-        "soccer_italy_serie_a", "soccer_italy_serie_b",
-        "soccer_france_ligue_one", "soccer_france_ligue_two",
+        "soccer_epl",
+        "soccer_efl_champ",
+        "soccer_spain_la_liga",
+        "soccer_spain_segunda_division",
+        "soccer_germany_bundesliga",
+        "soccer_germany_bundesliga2",
+        "soccer_italy_serie_a",
+        "soccer_italy_serie_b",
+        "soccer_france_ligue_one",
+        "soccer_france_ligue_two",
         "soccer_turkey_super_league",
         "soccer_netherlands_eredivisie",
         "soccer_belgium_first_div",
     ]
-    
+
     @field_validator("IYZICO_BASE_URL", mode="before")
     @classmethod
     def sanitize_iyzico_url(cls, v: str) -> str:
@@ -106,12 +126,16 @@ class Settings(BaseSettings):
             return v
         return v.replace("https://", "").replace("http://", "").rstrip("/")
 
-    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @field_validator("ALLOWED_ORIGINS", "TRUSTED_PROXIES", mode="before")
     @classmethod
-    def parse_allowed_origins(cls, v: str | list[str]) -> list[str]:
+    def parse_comma_separated_list(cls, v: Any) -> list[str]:
+        # Eğer .env'den string geldiyse virgülle ayırıp temizle
         if isinstance(v, str):
-            return [i.strip() for i in v.split(",")]
-        return v
+            return [i.strip() for i in v.split(",") if i.strip()]
+        # Zaten listeyse (default değer) olduğu gibi bırak
+        if isinstance(v, list):
+            return v
+        return []
 
     model_config = {
         "env_file": ".env",

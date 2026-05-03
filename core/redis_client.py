@@ -18,15 +18,17 @@ class RedisManager:
         self._client: aioredis.Redis | None = None
 
     async def connect(self) -> None:
-        """Redis bagantisini kur ve test et."""
         self._client = aioredis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
             max_connections=20,
+            socket_connect_timeout=5,  # ← bağlantı timeout
+            socket_timeout=5,  # ← komut timeout
+            retry_on_timeout=True,  # ← timeout'ta retry yap
+            health_check_interval=30,  # ← 30s'de bir ping at, bağlantıyı canlı tut
         )
-        # Baglanti testi
         await self._client.ping()
-        logger.info("Redis baglantisi kuruldu: %s", settings.REDIS_URL)
+        logger.info("Redis bağlantısı kuruldu: %s", settings.REDIS_URL)
 
     def get_client(self) -> aioredis.Redis:
         """Aktif Redis istemcisini dondurur."""

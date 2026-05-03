@@ -10,6 +10,8 @@ from repositories.user_repository import UserRepository
 from schemas.auth import UserInDB, UserTier
 from services.billing_service import BillingService
 from utils.dependencies import get_current_active_user
+from fastapi.responses import RedirectResponse
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,18 +22,21 @@ router = APIRouter(prefix="/api/v1/billing", tags=["Billing"])
 
 from services.payment.factory import PaymentProviderFactory
 
+
 async def get_billing_service() -> BillingService:
     db = mongo.get_db()
-    
+
     # Faz 6 Fix: Strategy Pattern Factory kullanimi
     provider = PaymentProviderFactory.get_provider(settings.PAYMENT_PROVIDER)
-        
+
     return BillingService(user_repo=UserRepository(db), provider=provider)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 from pydantic import BaseModel
+
+
 class CheckoutRequest(BaseModel):
     plan_id: str  # "pro" veya "elite"
     identity_number: str = "11111111111"  # Default test value
@@ -46,6 +51,7 @@ class GuestCheckoutRequest(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/plans")
 async def get_plans():
@@ -75,6 +81,9 @@ async def create_checkout_session(
 
     try:
         ip = request.client.host if request.client else "127.0.0.1"
+        if not current_user.id:
+            raise HTTPException(status_code=401, detail="User identity is incomplete.")
+
         checkout_url = await billing_service.create_checkout_session(
             user_id=current_user.id,
             user_email=current_user.email,
@@ -82,12 +91,17 @@ async def create_checkout_session(
             identity_number=body.identity_number,
             ip=ip,
             registration_date=current_user.created_at,
-            last_login_date=current_user.last_login_at
+            last_login_date=current_user.last_login_at,
         )
         return {"checkout_url": checkout_url}
     except Exception as exc:
-        logger.error("Checkout hatasi [User: %s]: %s", current_user.email, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Ödeme oturumu başlatılamadı. Lütfen daha sonra tekrar deneyiniz.")
+        logger.error(
+            "Checkout hatasi [User: %s]: %s", current_user.email, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Ödeme oturumu başlatılamadı. Lütfen daha sonra tekrar deneyiniz.",
+        )
 
 
 @router.post("/guest-checkout")
@@ -103,7 +117,9 @@ async def initialize_guest_checkout(
     # Email kontrolü
     existing = await billing_service.repo.get_by_email(body.email)
     if existing:
-        raise HTTPException(status_code=400, detail="Bu email adresi zaten kullaniliyor.")
+        raise HTTPException(
+            status_code=400, detail="Bu email adresi zaten kullaniliyor."
+        )
 
     try:
         ip = request.client.host if request.client else "127.0.0.1"
@@ -112,17 +128,21 @@ async def initialize_guest_checkout(
             "password": body.password,
             "display_name": body.display_name,
             "identity_number": body.identity_number,
-            "ip": ip
+            "ip": ip,
         }
-        checkout_url = await billing_service.initialize_guest_checkout(reg_data, body.plan_id)
+        checkout_url = await billing_service.initialize_guest_checkout(
+            reg_data, body.plan_id
+        )
         return {"checkout_url": checkout_url}
     except Exception as exc:
-        logger.error("Guest Checkout hatasi [Email: %s]: %s", body.email, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Ödeme ve kayıt işlemi başlatılamadı. Lütfen bilgilerinizi kontrol edip tekrar deneyiniz.")
+        logger.error(
+            "Guest Checkout hatasi [Email: %s]: %s", body.email, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Ödeme ve kayıt işlemi başlatılamadı. Lütfen bilgilerinizi kontrol edip tekrar deneyiniz.",
+        )
 
-
-from fastapi.responses import RedirectResponse
-from core.config import settings
 
 @router.post("/webhook")
 async def billing_webhook(
@@ -139,43 +159,50 @@ async def billing_webhook(
         payload = dict(payload)
 
     headers = request.headers
-    
+
     # Idempotency Kontrolü (Faz 5 Fix: Provider-Specific Unique ID + Atomic SET NX)
     # Iyzico 'token' veya 'paymentId' gönderir. Stripe 'id' (event id) gönderir.
     unique_id = (
-        payload.get("token") or 
-        payload.get("paymentId") or 
-        payload.get("id") or 
-        headers.get("X-Idempotency-Key")
+        payload.get("token")
+        or payload.get("paymentId")
+        or payload.get("id")
+        or headers.get("X-Idempotency-Key")
     )
-    
+
     if unique_id:
         from core.redis_client import redis_manager
+
         redis = redis_manager.get_client()
         lock_key = f"idempotency:billing:{unique_id}"
-        
+
         # Atomic SET NX: Sadece anahtar yoksa yaz ve True dön. (Race condition engellenir)
-        is_new = await redis.set(lock_key, "processing", ex=300, nx=True) # Başlangıçta 5 dk kilit
+        is_new = await redis.set(
+            lock_key, "processing", ex=300, nx=True
+        )  # Başlangıçta 5 dk kilit
         if not is_new:
             current_status = await redis.get(lock_key)
             if current_status == "processing":
                 logger.warning("Webhook hala isleniyor (409): %s", unique_id)
-                raise HTTPException(status_code=409, detail="Payment is currently being processed. Please try again later.")
-            
-            logger.info("Mükerrer webhook isteği engellendi (Already processed): %s", unique_id)
+                raise HTTPException(
+                    status_code=409,
+                    detail="Payment is currently being processed. Please try again later.",
+                )
+
+            logger.info(
+                "Mükerrer webhook isteği engellendi (Already processed): %s", unique_id
+            )
             return {"status": "already_processed"}
 
     try:
         success = await billing_service.handle_webhook(payload, headers)
-        
+
         if success:
             if unique_id:
                 # İşlem başarılıysa kilidi 24 saate uzat (artık 'processed')
                 await redis.setex(lock_key, 86400, "processed")
-            
+
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/login?payment=success", 
-                status_code=303
+                url=f"{settings.FRONTEND_URL}/login?payment=success", status_code=303
             )
         else:
             # İşlem başarısızsa kilidi kaldır (retry için)
@@ -186,9 +213,8 @@ async def billing_webhook(
         if unique_id:
             await redis.delete(lock_key)
         raise HTTPException(status_code=500, detail="Webhook processing failed")
-    
+
     # Başarısızsa planlar sayfasina hata ile don
     return RedirectResponse(
-        url=f"{settings.FRONTEND_URL}/pricing?error=payment_failed", 
-        status_code=303
+        url=f"{settings.FRONTEND_URL}/pricing?error=payment_failed", status_code=303
     )

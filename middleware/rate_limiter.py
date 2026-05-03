@@ -14,11 +14,14 @@ Yeni yaklasim (Sliding Window — Redis Sorted Set):
 
 import time
 import uuid
+import logging
 
 from fastapi import Request, HTTPException
 from core.config import TierLimits
 from core.redis_client import redis_manager
 from schemas.auth import UserTier
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
@@ -80,9 +83,10 @@ class RateLimiter:
                 )
         except HTTPException:
             raise
-        except Exception:
-            # Redis arizasi durumunda guvenlik icin istegi reddet (fail-closed) - Faz 1
-            raise HTTPException(
-                status_code=503,
-                detail="Rate limiter servisi su an kullanilamiyor. Lutfen daha sonra tekrar deneyin."
+        except Exception as e:
+            # Redis geçici olarak erişilemez — fail-open: sistemi çökertme
+            logger.warning(
+                "Rate limiter Redis erişilemez, istek geçiriliyor",
+                extra={"extra_fields": {"identifier": identifier, "error": str(e)}}
             )
+            return

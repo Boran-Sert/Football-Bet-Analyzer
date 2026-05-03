@@ -24,7 +24,7 @@ class UserLogin(BaseModel):
 
 
 class UserInDB(BaseModel):
-    id: str = Field(default="", alias="_id")
+    id: str | None = Field(default=None, alias="_id")
     email: str
     display_name: str
     hashed_password: str

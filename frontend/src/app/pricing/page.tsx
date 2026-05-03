@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { CheckIcon } from "@heroicons/react/24/solid";
 import { API_URL } from "@/config/constants";
 
@@ -15,6 +16,7 @@ export default function PricingPage() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const router = useRouter();
 
   useEffect(() => {
     const fetchPlans = async () => {
@@ -42,8 +44,8 @@ export default function PricingPage() {
       });
       
       if (!authRes.ok) {
-        // Redirect to register with plan_id
-        window.location.href = `/register?plan=${planId}`;
+        // Redirect to register with plan_id using Next.js router for better UX
+        router.push(`/register?plan=${planId}`);
         return;
       }
 
@@ -58,6 +60,7 @@ export default function PricingPage() {
 
       const data = await res.json();
       if (res.ok && data.checkout_url) {
+        // Iyzico checkout is an external URL, so window.location is correct here
         window.location.href = data.checkout_url;
       } else {
         const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;

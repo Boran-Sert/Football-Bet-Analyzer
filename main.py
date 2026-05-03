@@ -1,5 +1,6 @@
 """FastAPI uygulama giris noktasi — billing router eklendi (GAP 4)."""
 
+from fastapi import HTTPException
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,12 +16,17 @@ from middleware.telemetry import TelemetryMiddleware
 from routers.admin import router as admin_router
 from routers.analysis import router as analysis_router
 from routers.auth import router as auth_router
-from routers.billing import router as billing_router        # ← GAP 4: Stripe
+from routers.billing import router as billing_router  # ← GAP 4: Stripe
 from routers.matches import router as matches_router
 from tasks.scheduler import scheduler, configure_scheduler
 from fastapi.exceptions import RequestValidationError
 from prometheus_fastapi_instrumentator import Instrumentator
-from utils.exceptions import AppException, app_exception_handler, global_exception_handler, validation_exception_handler
+from utils.exceptions import (
+    AppException,
+    app_exception_handler,
+    global_exception_handler,
+    validation_exception_handler,
+)
 
 from core.logger import logger
 
@@ -54,17 +60,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.TRUSTED_PROXIES)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(TelemetryMiddleware)
+
+# CORSMiddleware EN SON eklenecek (En dışta çalışacak ve ilk OPTIONS'ı yakalayacak)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Wildcard kaldirildi
-    allow_headers=["Authorization", "Content-Type"],             # Wildcard kaldirildi
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(TelemetryMiddleware)
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
@@ -73,14 +80,31 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(matches_router)
 app.include_router(analysis_router)
-app.include_router(billing_router)   # ← GAP 4
-app.include_router(admin_router)
+app.include_router(billing_router)
 
 # Prometheus Metrikleri (Faz 3)
-Instrumentator().instrument(app).expose(app)
+Instrumentator().instrument(app).expose(
+    app, include_in_schema=False, tags=["Monitoring"]
+)
 
 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+
+
+@app.get("/metrics")
+async def metrics_endpoint(request: Request):
+    """Custom metrics endpoint with IP whitelist."""
+    client_ip = request.client.host if request.client else "unknown"
+    allowed_ips = ["127.0.0.1", "::1"] + settings.TRUSTED_PROXIES
+
+    if client_ip not in allowed_ips:
+        logger.warning(f"Unauthorized metrics access attempt from {client_ip}")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 
 @app.get("/health")
 async def health_check():
@@ -103,8 +127,8 @@ async def health_check():
         health["status"] = "degraded"
 
     health["components"]["scheduler"] = "running" if scheduler.running else "stopped"
-    
+
     if health["status"] == "degraded":
         return JSONResponse(content=health, status_code=503)
-        
+
     return health

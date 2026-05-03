@@ -1,6 +1,7 @@
 """Standardized exception classes and handlers for global error management (Faz 3)."""
 
 from fastapi import Request
+from starlette.background import BackgroundTask
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from core.config import settings
@@ -94,7 +95,10 @@ async def global_exception_handler(request: Request, exc: Exception):
             f"*Error:* {error_msg}\n"
             f"*Traceback:* ```{stack_trace[:300]}...```" # Truncate to avoid limit
         )
-        await send_telegram_alert(alert_text)
+        # Faz 6 Fix: Telegram alert'i BackgroundTask ile yolla (Self-DDoS engellendi)
+        background = BackgroundTask(send_telegram_alert, alert_text)
+    else:
+        background = None
     
     return JSONResponse(
         status_code=500,
@@ -103,5 +107,6 @@ async def global_exception_handler(request: Request, exc: Exception):
             "message": "An unexpected error occurred. Our team has been notified via Telegram.",
             "detail": None
         },
-        headers=get_cors_headers(request)
+        headers=get_cors_headers(request),
+        background=background
     )

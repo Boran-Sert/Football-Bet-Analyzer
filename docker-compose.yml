@@ -9,14 +9,16 @@ services:
     env_file:
       - .env
     environment:
-      - MONGO_URI=mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/football_saas?authSource=admin
       - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
     depends_on:
-      - mongodb
-      - redis
+      mongodb:
+        condition: service_healthy # ← MongoDB HAZIR olana kadar bekle
+      redis:
+        condition: service_healthy # ← Redis HAZIR olana kadar bekle
     networks:
       - saas_network
+    restart: unless-stopped
 
   mongodb:
     image: mongo:latest
@@ -30,9 +32,16 @@ services:
       - mongo_data:/data/db
     networks:
       - saas_network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     container_name: football_saas_redis
     ports:
       - "6379:6379"
@@ -40,6 +49,16 @@ services:
       - redis_data:/data
     networks:
       - saas_network
+    restart: unless-stopped
+    # Persistence: hem RDB snapshot hem AOF log
+    command: >
+      redis-server --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1000
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 networks:
   saas_network:

@@ -27,9 +27,6 @@ class FootballAdapter(SportAdapter):
     sport = "football"
 
     # ══════════════════════════════════════════
-    #  Odds API JSON → MatchEntity
-    # ══════════════════════════════════════════
-
     def normalize_upcoming(self, raw_events: list[dict]) -> list[MatchEntity]:
         """Odds API /odds yanitini MatchEntity listesine donusturur."""
         entities: list[MatchEntity] = []
@@ -41,16 +38,24 @@ class FootballAdapter(SportAdapter):
                 odds = self._extract_best_odds(
                     event.get("bookmakers", []), raw_home, raw_away
                 )
+
+                norm_home = normalize_team_name(raw_home)
+                norm_away = normalize_team_name(raw_away)
+                commence_time = datetime.fromisoformat(
+                    event["commence_time"].replace("Z", "+00:00")
+                )
+                
+                # Deterministic ID (Faz 6 Fix: ID Collision / Zombie Matches)
+                external_id = self._generate_deterministic_id(norm_home, norm_away, commence_time)
+                
                 entity = MatchEntity(
-                    external_id=event["id"],
+                    external_id=external_id,
                     sport=self.sport,
                     league_key=event.get("sport_key", ""),
                     league_title=LEAGUE_TITLES.get(event.get("sport_key", ""), ""),
-                    home_team=normalize_team_name(raw_home),
-                    away_team=normalize_team_name(raw_away),
-                    commence_time=datetime.fromisoformat(
-                        event["commence_time"].replace("Z", "+00:00")
-                    ),
+                    home_team=norm_home,
+                    away_team=norm_away,
+                    commence_time=commence_time,
                     status=MatchStatus.UPCOMING,
                     odds=odds,
                     metrics={},
@@ -218,8 +223,8 @@ class FootballAdapter(SportAdapter):
             sport="football",
             league_key=league_key,
             league_title=LEAGUE_TITLES.get(league_key, league_code),
-            home_team=normalize_team_name(home),
-            away_team=normalize_team_name(away),
+            home_team=norm_home,
+            away_team=norm_away,
             commence_time=commence_time,
             status=MatchStatus.COMPLETED,
             odds=odds,
@@ -227,6 +232,16 @@ class FootballAdapter(SportAdapter):
             source=MatchSource.FOOTBALL_DATA_CSV,
             updated_at=datetime.utcnow(),
         )
+
+    def _generate_deterministic_id(self, home: str, away: str, commence_time: datetime) -> str:
+        """Mac icin deterministik bir ID uretir (Takimlar + Tarih)."""
+        # Takim isimlerini normalize et (bosluklari at, kucuk harf yap)
+        norm_home = home.replace(" ", "").lower()
+        norm_away = away.replace(" ", "").lower()
+        date_str = commence_time.strftime("%Y-%m-%d")
+        
+        raw_id = f"{date_str}_{norm_home}_{norm_away}"
+        return hashlib.md5(raw_id.encode()).hexdigest()
 
     def _parse_date(self, date_str: str) -> datetime | None:
         formats = ["%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"]

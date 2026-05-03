@@ -11,7 +11,7 @@ class MatchService:
     def __init__(self, repo: MatchRepository):
         self.repo = repo
 
-    @cache_response(ttl_seconds=300, prefix="matches:upcoming")
+    @cache_response(expire=300, key_prefix="matches:upcoming")
     async def get_upcoming_matches(
         self,
         sport: str = "football",
@@ -22,7 +22,7 @@ class MatchService:
         """Yaklasan maclari getirir (5 dakika cache)."""
         return await self.repo.get_upcoming_matches(sport, league_key, limit, skip)
 
-    @cache_response(ttl_seconds=3600, prefix="matches:leagues")
+    @cache_response(expire=3600, key_prefix="matches:leagues")
     async def get_available_leagues(self, sport: str = "football") -> list[str]:
         """Sistemdeki ligleri getirir (1 saat cache)."""
         return await self.repo.get_available_leagues(sport)

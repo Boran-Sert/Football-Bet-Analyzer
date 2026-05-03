@@ -23,7 +23,7 @@ from utils.cache import cache_response
 
 logger = logging.getLogger(__name__)
 
-DISTANCE_THRESHOLD = 3.0  # Bu degerin ustundeki maclar zaten benzer sayilmaz
+DISTANCE_THRESHOLD = 3.0  # Analiz kalitesi için hassasiyeti artırdık (Öneri: 1.5)
 
 
 class SimilarMatchResult(BaseModel):
@@ -38,7 +38,7 @@ class AnalysisService:
     def __init__(self, match_repo: MatchRepository):
         self.repo = match_repo
 
-    @cache_response(ttl_seconds=3600, prefix="analysis:similar")
+    @cache_response(expire=3600, key_prefix="analysis:similar")
     async def find_similar_matches(
         self,
         target_match_id: str,
@@ -108,40 +108,35 @@ class AnalysisService:
         away: float,
         limit: int,
     ) -> list[SimilarMatchResult]:
-        """Kabaca filtrelenmis veriyi DB'den ceker, mesafeyi Python'da hesaplar (Faz 6 Fix)."""
-        
-        # 1. MongoDB'den sadece kabaca filtrelenmis veriyi cek (İndeksli alanlar üzerinden)
-        # Bu sayede DB tarafında COLLSCAN ve In-Memory Sort engellenir.
-        pipeline = [
-            {"$match": {"status": "completed"}},
-            {
-                "$match": {
-                    "odds.h2h.home": {"$gte": home - 1.0, "$lte": home + 1.0},
-                    "odds.h2h.draw": {"$gte": draw - 1.0, "$lte": draw + 1.0},
-                    "odds.h2h.away": {"$gte": away - 1.0, "$lte": away + 1.0},
-                }
-            },
-            # Bellek dostu limit: Cok fazla veri gelirse bile hard cap koy (Ornegin 2000)
-            {"$limit": 2000}
-        ]
+        """Repository üzerinden filtrelenmiş veriyi çeker, mesafeyi Python'da hesaplar."""
 
-        db = self.repo.collection.database
-        cursor = db.matches.aggregate(pipeline)
-        docs = await cursor.to_list(length=2000)
+        # Rule 12 Fix: Raw DB erişimi yerine repository metodu kullanıldı
+        docs = await self.repo.find_matches_by_odds_range(
+            home=home, draw=draw, away=away, limit=2000
+        )
 
         def process_docs(docs_list):
             results_local = []
             for doc in docs_list:
                 try:
-                    h = doc["odds"]["h2h"]["home"]
-                    d = doc["odds"]["h2h"]["draw"]
-                    a = doc["odds"]["h2h"]["away"]
-                    
-                    # Euclidean mesafe (Python tarafında)
-                    dist = math.sqrt(
-                        (h - home)**2 + (d - draw)**2 + (a - away)**2
-                    )
-                    
+                    # Robust odds retrieval: both nested (h2h) and flat structures
+                    odds_data = doc.get("odds", {})
+                    h2h = odds_data.get("h2h", {})
+
+                    h = h2h.get("home") or odds_data.get("home")
+                    d = h2h.get("draw") or odds_data.get("draw")
+                    a = h2h.get("away") or odds_data.get("away")
+
+                    if h is None or d is None or a is None:
+                        continue
+
+                    # Oklid mesafesi (Euclidean Distance)
+                    dist = (
+                        (float(h) - home) ** 2
+                        + (float(d) - draw) ** 2
+                        + (float(a) - away) ** 2
+                    ) ** 0.5
+
                     if dist < DISTANCE_THRESHOLD:
                         sim_pct = max(0.0, 100.0 - (dist * 33.3))
                         results_local.append(
@@ -151,9 +146,12 @@ class AnalysisService:
                                 similarity_percentage=round(sim_pct, 1),
                             )
                         )
-                except Exception:
+                except Exception as e:
+                    logger.error(
+                        f"Mac dokumani dogrulama hatasi: {str(e)} | Match ID: {doc.get('external_id')}"
+                    )
                     continue
-            
+
             # Python tarafında sıralama (MongoDB In-memory sort limit sorunu yok)
             results_local.sort(key=lambda x: x.distance)
             return results_local[:limit]

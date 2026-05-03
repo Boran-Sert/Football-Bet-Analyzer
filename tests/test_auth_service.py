@@ -14,19 +14,24 @@ def auth_service(mock_user_repo):
 
 
 class TestPasswordHashing:
-    def test_hash_and_verify_succeed(self, auth_service):
+    @pytest.mark.asyncio
+    async def test_hash_and_verify_succeed(self, auth_service):
         plain = "SecurePass123!"
-        hashed = auth_service.get_password_hash(plain)
-        assert auth_service.verify_password(plain, hashed)
+        hashed = await auth_service.get_password_hash(plain)
+        assert await auth_service.verify_password(plain, hashed)
 
-    def test_wrong_password_fails(self, auth_service):
-        hashed = auth_service.get_password_hash("correct_password")
-        assert not auth_service.verify_password("wrong_password", hashed)
+    @pytest.mark.asyncio
+    async def test_wrong_password_fails(self, auth_service):
+        hashed = await auth_service.get_password_hash("correct_password")
+        assert not await auth_service.verify_password("wrong_password", hashed)
 
-    def test_two_hashes_of_same_password_differ(self, auth_service):
+    @pytest.mark.asyncio
+    async def test_two_hashes_of_same_password_differ(self, auth_service):
         """bcrypt uses a random salt each time."""
         pw = "SamePassword1!"
-        assert auth_service.get_password_hash(pw) != auth_service.get_password_hash(pw)
+        hash1 = await auth_service.get_password_hash(pw)
+        hash2 = await auth_service.get_password_hash(pw)
+        assert hash1 != hash2
 
 
 # ─── Access token ─────────────────────────────────────────────────────────────

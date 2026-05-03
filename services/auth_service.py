@@ -77,6 +77,8 @@ class AuthService:
     # ── Access token ──────────────────────────────────────────────────────────
 
     def create_access_token(self, user_id: str, tier: UserTier, is_superuser: bool = False) -> str:
+        if not user_id:
+            raise ValueError("User ID is required for access token creation")
         expire = datetime.utcnow() + timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES)
         to_encode = {
             "sub": user_id,
@@ -109,6 +111,8 @@ class AuthService:
         self, user_id: str, tier: UserTier, is_superuser: bool = False
     ) -> str:
         """Refresh token uretir ve JTI'sini Redis'e yazar (iptal edilebilir)."""
+        if not user_id:
+            raise ValueError("User ID is required for refresh token creation")
         jti = secrets.token_hex(32)
         expire_seconds = settings.JWT_REFRESH_EXPIRE_DAYS * 86400
         expire = datetime.utcnow() + timedelta(days=settings.JWT_REFRESH_EXPIRE_DAYS)

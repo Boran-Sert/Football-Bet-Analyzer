@@ -13,7 +13,15 @@ Endpoints:
 
 import hashlib
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    BackgroundTasks,
+    Response,
+    Request,
+)
 
 from clients.email_client import email_client
 from core.config import settings
@@ -61,6 +69,9 @@ async def register(
         email_client.send_verification_email, user.email, verify_url
     )
 
+    if not user.id:
+        raise HTTPException(status_code=500, detail="User ID generation failed.")
+
     access_token = auth_service.create_access_token(
         user.id, user.tier, user.is_superuser
     )
@@ -75,16 +86,16 @@ async def register(
         value=access_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+        samesite="lax",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600,
     )
 
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
@@ -103,11 +114,11 @@ async def login(
     if await auth_service.is_account_locked(credentials.email):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Çok fazla başarısız deneme. Hesabınız 15 dakika süreyle kilitlendi."
+            detail="Çok fazla başarısız deneme. Hesabınız 15 dakika süreyle kilitlendi.",
         )
 
     user = await auth_service.repo.get_by_email(credentials.email)
-    if not user or not auth_service.verify_password(
+    if not user or not await auth_service.verify_password(
         credentials.password, user.hashed_password
     ):
         await auth_service.record_login_failure(credentials.email)
@@ -115,6 +126,9 @@ async def login(
 
     # Success: Reset attempts
     await auth_service.reset_login_attempts(credentials.email)
+
+    if not user.id:
+        raise HTTPException(status_code=500, detail="User ID is missing in database.")
 
     access_token = auth_service.create_access_token(
         user.id, user.tier, user.is_superuser
@@ -130,16 +144,16 @@ async def login(
         value=access_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+        samesite="lax",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600,
     )
 
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
@@ -159,33 +173,34 @@ async def refresh_access_token(
 
     Eski refresh token otomatik olarak iptal edilir (token rotation).
     """
-    refresh_token = (body.refresh_token if body else None) or request.cookies.get("refresh_token")
-    
+    refresh_token = (body.refresh_token if body else None) or request.cookies.get(
+        "refresh_token"
+    )
+
     if not refresh_token:
-        raise HTTPException(
-            status_code=401, detail="Refresh token bulunamadi."
-        )
+        raise HTTPException(status_code=401, detail="Refresh token bulunamadi.")
 
     # Distributed Lock (Faz 6 Fix: Race Condition / Token Cloning)
     from core.redis_client import redis_manager
+
     redis = redis_manager.get_client()
     lock_key = f"lock:refresh:{hashlib.md5(refresh_token.encode()).hexdigest()}"
-    
+
     async with redis.lock(lock_key, timeout=10):
         token_data = await auth_service.verify_refresh_token(refresh_token)
         if not token_data:
             raise HTTPException(
                 status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
             )
-    
+
         # Rotate: revoke old, issue new pair
         await auth_service.revoke_refresh_token(refresh_token)
-    new_access = auth_service.create_access_token(
-        token_data.user_id, token_data.tier, token_data.is_superuser
-    )
-    new_refresh = await auth_service.create_refresh_token(
-        token_data.user_id, token_data.tier, token_data.is_superuser
-    )
+        new_access = auth_service.create_access_token(
+            token_data.user_id, token_data.tier, token_data.is_superuser
+        )
+        new_refresh = await auth_service.create_refresh_token(
+            token_data.user_id, token_data.tier, token_data.is_superuser
+        )
 
     # Cookie tabanli auth (Faz 1)
     is_prod = settings.ENVIRONMENT == "production"
@@ -194,16 +209,16 @@ async def refresh_access_token(
         value=new_access,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+        samesite="lax",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
         key="refresh_token",
         value=new_refresh,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600,
     )
 
     return TokenResponse(access_token=new_access, refresh_token=new_refresh)
@@ -216,12 +231,11 @@ async def refresh_access_token(
 async def logout(
     request: Request,
     response: Response,
-    current_user: UserInDB = Depends(get_current_active_user),
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Refresh token'i iptal eder ve cookieleri temizler."""
     refresh_token = request.cookies.get("refresh_token")
-    
+
     if refresh_token:
         await auth_service.revoke_refresh_token(refresh_token)
     # Cookieleri temizle (Faz 6 Fix: Ghost Cookies)
@@ -230,11 +244,11 @@ async def logout(
         "path": "/",
         "httponly": True,
         "secure": is_prod,
-        "samesite": "strict",
+        "samesite": "lax",
     }
     response.delete_cookie("access_token", **cookie_params)
     response.delete_cookie("refresh_token", **cookie_params)
-    
+
     return {"message": "Basariyla cikis yapildi."}
 
 
@@ -303,6 +317,9 @@ async def change_password(
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Mevcut sifreyi dogrulayarak yeni sifre belirler."""
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+        
     success = await auth_service.change_password(
         current_user.id, body.current_password, body.new_password
     )
@@ -316,6 +333,9 @@ async def change_password(
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: UserInDB = Depends(get_current_active_user)):
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+        
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
@@ -345,6 +365,9 @@ async def request_email_change(
             status_code=400, detail="Bu email adresi zaten kullaniliyor."
         )
 
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+
     token = auth_service.create_email_change_token(current_user.id, body.new_email)
     confirm_url = f"{settings.FRONTEND_URL}/confirm-email-change?token={token}"
 
@@ -367,7 +390,9 @@ async def confirm_email_change(
         )
     return {"message": "Email adresiniz basariyla guncellendi."}
 
+
 # ── Account Deletion (GDPR) ───────────────────────────────────────────────────
+
 
 @router.delete("/account", status_code=status.HTTP_200_OK)
 async def delete_account(
@@ -377,15 +402,18 @@ async def delete_account(
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Kullanicinin hesabini ve verilerini kalici olarak siler (GDPR)."""
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+
     success = await auth_service.delete_account(current_user.id, body.password)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Sifre hatali veya hesap silinemedi."
+            detail="Sifre hatali veya hesap silinemedi.",
         )
-    
+
     # Cookieleri temizle
     response.delete_cookie("access_token")
     response.delete_cookie("refresh_token")
-    
+
     return {"message": "Hesabiniz ve tum verileriniz basariyla silindi."}

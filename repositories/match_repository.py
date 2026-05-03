@@ -68,3 +68,64 @@ class MatchRepository:
     async def count_matches(self, query: dict) -> int:
         """Verilen sorguya uyan mac sayisini dondurur."""
         return await self.collection.count_documents(query)
+
+    async def get_by_external_ids(self, external_ids: list[str]) -> list[dict]:
+        """Birden fazla ID'yi tek seferde sorgular (Faz 6 Fix: N+1 engelleme)."""
+        cursor = self.collection.find(
+            {"external_id": {"$in": external_ids}},
+            {"external_id": 1, "updated_at": 1}
+        )
+        return await cursor.to_list(length=len(external_ids))
+
+    async def find_matches_by_odds_range(
+        self,
+        home: float,
+        draw: float,
+        away: float,
+        limit: int = 2000
+    ) -> list[dict]:
+        """Oran aralığına göre tamamlanmış maçları getirir (Benzerlik analizi için)."""
+        # Basit ve güvenilir $or sorgusu (Atlas uyumlu)
+        query = {
+            "status": {"$regex": f"^{MatchStatus.COMPLETED.value}$", "$options": "i"},
+            "$or": [
+                {
+                    "odds.h2h.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
+                    "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
+                    "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
+                },
+                {
+                    "odds.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
+                    "odds.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
+                    "odds.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
+                }
+            ]
+        }
+        
+        from core.logger import logger
+        logger.info(f"Benzerlik sorgusu baslatildi: H:{home} D:{draw} A:{away}")
+        
+        cursor = self.collection.find(query).limit(limit)
+        docs = await cursor.to_list(length=limit)
+        
+        logger.info(f"Sorgu tamamlandi. Bulunan ham mac sayisi: {len(docs)}")
+        return docs
+
+    async def bulk_upsert(self, entities: list[MatchEntity]) -> dict:
+        """Toplu mac guncelleme/ekleme (Faz 6 Fix: Mimari uyum)."""
+        if not entities:
+            return {"upserted": 0, "modified": 0}
+            
+        operations = [
+            UpdateOne(
+                {"external_id": e.external_id},
+                {"$set": e.model_dump()},
+                upsert=True
+            ) for e in entities
+        ]
+        
+        result = await self.collection.bulk_write(operations, ordered=False)
+        return {
+            "upserted": result.upserted_count,
+            "modified": result.modified_count
+        }

@@ -112,21 +112,32 @@ export default function Home() {
   const handleFetchAnalysis = async () => {
     if (!selectedMatch) return;
     setLoadingAnalysis(true);
+    setSimilarMatches([]); // Clear previous results to show loading state clearly
+    
     try {
+      console.log(`Analiz başlatılıyor: ${selectedMatch.external_id} | Limit: ${limit}`);
       const res = await fetch(`${API_URL}/api/v1/football/analysis/similar/${selectedMatch.external_id}?limit=${limit}`, {
         credentials: "include",
       });
 
-      const data = await res.json();
-
       if (!res.ok) {
-        const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
-        throw new Error((typeof errMsg === "string" ? errMsg : null) || "Analiz yapılamadı.");
+        const errorData = await res.json().catch(() => ({ detail: "Bilinmeyen bir hata oluştu" }));
+        const errMsg = Array.isArray(errorData.detail) ? errorData.detail.map((e: any) => e.msg).join(", ") : errorData.detail;
+        throw new Error(errMsg || "Analiz yapılamadı.");
       }
 
-      setSimilarMatches(data);
+      const data = await res.json();
+      console.log("Backend'den gelen veri:", data);
+      
+      // Backend bazen direkt liste, bazen {data: [...]} şeklinde dönebilir. Her iki durumu da handle edelim.
+      const resultList = Array.isArray(data) ? data : (data.results || data.data || []);
+      setSimilarMatches(resultList);
+      
+      if (resultList.length === 0) {
+        console.warn("Benzer maç bulunamadı.");
+      }
     } catch (err: any) {
-      console.error(err);
+      console.error("Analiz Hatası:", err);
       alert(err.message || "Analiz hatası");
       setSimilarMatches([]);
     } finally {
@@ -299,7 +310,7 @@ export default function Home() {
             />
           </div>
 
-          {similarMatches.length > 0 && (
+          {similarMatches.length > 0 ? (
             <div className="grid grid-cols-1 gap-8 mt-4">
               <div className="glass rounded-[2rem] overflow-hidden card-shadow">
                 <SimilarMatchesTable results={similarMatches} />
@@ -309,6 +320,14 @@ export default function Home() {
                 <h3 className="text-lg font-bold text-white mb-6">İstatistik Özeti</h3>
                 <SummaryStats results={similarMatches} />
               </div>
+            </div>
+          ) : !loadingAnalysis && (
+            <div className="mt-8 glass rounded-[2rem] p-12 flex flex-col items-center justify-center gap-4 card-shadow border border-white/5 opacity-60">
+               <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-slate-500"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+               </div>
+               <p className="text-slate-500 text-xs font-black uppercase tracking-widest text-center">Veritabanında benzer oranlara sahip maç bulunamadı.</p>
+               <p className="text-slate-700 text-[10px] font-bold uppercase tracking-tight text-center max-w-[250px]">Lütfen farklı bir maç seçin veya benzerlik limitini değiştirerek tekrar deneyin.</p>
             </div>
           )}
         </section>

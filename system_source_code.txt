@@ -19,6 +19,8 @@ adapters/
   __init__.py
   parsers/
     csv_parsers.py
+brain/
+  28c0d34e-cde2-4e9f-92e8-0e84b6d1ffc1/
 clients/
   base_client.py
   email_client.py
@@ -213,10 +215,13 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
     depends_on:
-      - mongodb
-      - redis
+      mongodb:
+        condition: service_healthy # ← MongoDB HAZIR olana kadar bekle
+      redis:
+        condition: service_healthy # ← Redis HAZIR olana kadar bekle
     networks:
       - saas_network
+    restart: unless-stopped
 
   mongodb:
     image: mongo:latest
@@ -230,9 +235,16 @@ services:
       - mongo_data:/data/db
     networks:
       - saas_network
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "mongosh", "--eval", "db.adminCommand('ping')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     container_name: football_saas_redis
     ports:
       - "6379:6379"
@@ -240,6 +252,16 @@ services:
       - redis_data:/data
     networks:
       - saas_network
+    restart: unless-stopped
+    # Persistence: hem RDB snapshot hem AOF log
+    command: >
+      redis-server --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy allkeys-lru --save 60 1000
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 networks:
   saas_network:
@@ -296,8 +318,7 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Run the application with Gunicorn for production (Multi-process)
-CMD ["gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000"]
+CMD ["gunicorn", "main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "120"]
 
 
 --- DOSYA: main.py ---
@@ -318,12 +339,17 @@ from middleware.telemetry import TelemetryMiddleware
 from routers.admin import router as admin_router
 from routers.analysis import router as analysis_router
 from routers.auth import router as auth_router
-from routers.billing import router as billing_router        # ← GAP 4: Stripe
+from routers.billing import router as billing_router  # ← GAP 4: Stripe
 from routers.matches import router as matches_router
 from tasks.scheduler import scheduler, configure_scheduler
 from fastapi.exceptions import RequestValidationError
 from prometheus_fastapi_instrumentator import Instrumentator
-from utils.exceptions import AppException, app_exception_handler, global_exception_handler, validation_exception_handler
+from utils.exceptions import (
+    AppException,
+    app_exception_handler,
+    global_exception_handler,
+    validation_exception_handler,
+)
 
 from core.logger import logger
 
@@ -357,17 +383,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.TRUSTED_PROXIES)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(TelemetryMiddleware)
+
+# CORSMiddleware EN SON eklenecek (En dışta çalışacak ve ilk OPTIONS'ı yakalayacak)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Wildcard kaldirildi
-    allow_headers=["Authorization", "Content-Type"],             # Wildcard kaldirildi
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(TelemetryMiddleware)
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
@@ -376,14 +403,32 @@ app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(matches_router)
 app.include_router(analysis_router)
-app.include_router(billing_router)   # ← GAP 4
-app.include_router(admin_router)
+app.include_router(billing_router)
 
 # Prometheus Metrikleri (Faz 3)
-Instrumentator().instrument(app).expose(app)
+Instrumentator().instrument(app).expose(
+    app,
+    include_in_schema=False,
+    tags=["Monitoring"]
+)
 
 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+
+
+@app.get("/metrics")
+async def metrics_endpoint(request: Request):
+    """Custom metrics endpoint with IP whitelist."""
+    client_ip = request.client.host if request.client else "unknown"
+    allowed_ips = ["127.0.0.1", "::1"] + settings.TRUSTED_PROXIES
+    
+    if client_ip not in allowed_ips:
+        logger.warning(f"Unauthorized metrics access attempt from {client_ip}")
+        raise HTTPException(status_code=403, detail="Forbidden")
+        
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
 
 @app.get("/health")
 async def health_check():
@@ -406,10 +451,10 @@ async def health_check():
         health["status"] = "degraded"
 
     health["components"]["scheduler"] = "running" if scheduler.running else "stopped"
-    
+
     if health["status"] == "degraded":
         return JSONResponse(content=health, status_code=503)
-        
+
     return health
 
 
@@ -424,6 +469,7 @@ authors = ["Boran Sert"]
 python = "^3.11"
 fastapi = "^0.110.0"
 uvicorn = {extras = ["standard"], version = "^0.29.0"}
+gunicorn = "^21.2.0"
 motor = "^3.3.2"
 redis = "^5.0.3"
 pydantic-settings = "^2.2.1"
@@ -538,6 +584,7 @@ Bu proje [MIT Lisansı](LICENSE) altında lisanslanmıştır.
 --- DOSYA: requirements.txt ---
 fastapi
 uvicorn[standard]
+gunicorn
 motor
 redis
 pydantic-settings
@@ -601,13 +648,24 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mongodb:
-        image: mongo:latest
+        image: mongo:7
         ports:
           - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval \"db.adminCommand('ping')\""
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 20s
       redis:
         image: redis:alpine
         ports:
           - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -724,9 +782,6 @@ class FootballAdapter(SportAdapter):
     sport = "football"
 
     # ══════════════════════════════════════════
-    #  Odds API JSON → MatchEntity
-    # ══════════════════════════════════════════
-
     def normalize_upcoming(self, raw_events: list[dict]) -> list[MatchEntity]:
         """Odds API /odds yanitini MatchEntity listesine donusturur."""
         entities: list[MatchEntity] = []
@@ -738,16 +793,24 @@ class FootballAdapter(SportAdapter):
                 odds = self._extract_best_odds(
                     event.get("bookmakers", []), raw_home, raw_away
                 )
+
+                norm_home = normalize_team_name(raw_home)
+                norm_away = normalize_team_name(raw_away)
+                commence_time = datetime.fromisoformat(
+                    event["commence_time"].replace("Z", "+00:00")
+                )
+                
+                # Deterministic ID (Faz 6 Fix: ID Collision / Zombie Matches)
+                external_id = self._generate_deterministic_id(norm_home, norm_away, commence_time)
+                
                 entity = MatchEntity(
-                    external_id=event["id"],
+                    external_id=external_id,
                     sport=self.sport,
                     league_key=event.get("sport_key", ""),
                     league_title=LEAGUE_TITLES.get(event.get("sport_key", ""), ""),
-                    home_team=normalize_team_name(raw_home),
-                    away_team=normalize_team_name(raw_away),
-                    commence_time=datetime.fromisoformat(
-                        event["commence_time"].replace("Z", "+00:00")
-                    ),
+                    home_team=norm_home,
+                    away_team=norm_away,
+                    commence_time=commence_time,
                     status=MatchStatus.UPCOMING,
                     odds=odds,
                     metrics={},
@@ -915,8 +978,8 @@ class FootballAdapter(SportAdapter):
             sport="football",
             league_key=league_key,
             league_title=LEAGUE_TITLES.get(league_key, league_code),
-            home_team=normalize_team_name(home),
-            away_team=normalize_team_name(away),
+            home_team=norm_home,
+            away_team=norm_away,
             commence_time=commence_time,
             status=MatchStatus.COMPLETED,
             odds=odds,
@@ -924,6 +987,16 @@ class FootballAdapter(SportAdapter):
             source=MatchSource.FOOTBALL_DATA_CSV,
             updated_at=datetime.utcnow(),
         )
+
+    def _generate_deterministic_id(self, home: str, away: str, commence_time: datetime) -> str:
+        """Mac icin deterministik bir ID uretir (Takimlar + Tarih)."""
+        # Takim isimlerini normalize et (bosluklari at, kucuk harf yap)
+        norm_home = home.replace(" ", "").lower()
+        norm_away = away.replace(" ", "").lower()
+        date_str = commence_time.strftime("%Y-%m-%d")
+        
+        raw_id = f"{date_str}_{norm_home}_{norm_away}"
+        return hashlib.md5(raw_id.encode()).hexdigest()
 
     def _parse_date(self, date_str: str) -> datetime | None:
         formats = ["%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"]
@@ -1708,7 +1781,9 @@ class TierLimits:
 
     @classmethod
     def get_rate_limit(cls, tier: str) -> int:
-        return cls.rate_limit_per_minute.get(tier, cls.rate_limit_per_minute["standard"])
+        return cls.rate_limit_per_minute.get(
+            tier, cls.rate_limit_per_minute["standard"]
+        )
 
 
 class Settings(BaseSettings):
@@ -1719,7 +1794,8 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str = "development"
     PAYMENT_PROVIDER: str = "iyzico"
-    
+    REQUIRE_EMAIL_VERIFICATION: bool = True
+
     # Telegram Notifications (Faz 3 - Lightweight Alerting)
     TELEGRAM_BOT_TOKEN: str | None = None
     TELEGRAM_CHAT_ID: str | None = None
@@ -1745,13 +1821,15 @@ class Settings(BaseSettings):
     # Get this from https://dashboard.stripe.com/webhooks
     STRIPE_WEBHOOK_SECRET: str = ""
     # Get these from https://dashboard.stripe.com/products (after creating products)
-    STRIPE_PRICE_PRO: str = ""    # e.g. price_1ABC...
+    STRIPE_PRICE_PRO: str = ""  # e.g. price_1ABC...
     STRIPE_PRICE_ELITE: str = ""  # e.g. price_1XYZ...
 
     # ── Iyzico (GAP 7) ──────────────────────────────────────────────────────
     IYZICO_API_KEY: str = ""
     IYZICO_SECRET_KEY: str = ""
-    IYZICO_BASE_URL: str = "sandbox-api.iyzipay.com"  # Iyzico SDK HTTPSConnection için protokol içermemeli
+    IYZICO_BASE_URL: str = (
+        "sandbox-api.iyzipay.com"  # Iyzico SDK HTTPSConnection için protokol içermemeli
+    )
 
     # ── Scheduler ──
     SCHEDULER_SLOTS: list[dict] = [
@@ -1763,23 +1841,38 @@ class Settings(BaseSettings):
     ACTIVE_SPORTS: list[str] = Field(default=["football"])
 
     # ── CORS ──
-    ALLOWED_ORIGINS: Any = Field(default=["http://localhost:3000", "http://127.0.0.1:3000"])
+    ALLOWED_ORIGINS: Any = Field(
+        default=[
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://100.82.212.6:3000",
+            "https://bet-analysis-fe.vercel.app",
+        ]
+    )
+
+    # ── Proxy / Security ──
+    TRUSTED_PROXIES: Any = Field(default=["127.0.0.1"])
 
     # ── Odds API ──
     ODDS_API_BASE_URL: str = "https://api.the-odds-api.com/v4"
     ODDS_API_REGIONS: str = "eu,uk"
     ODDS_API_MARKETS: str = "h2h,totals,btts"
     TARGET_LEAGUES: list[str] = [
-        "soccer_epl", "soccer_efl_champ",
-        "soccer_spain_la_liga", "soccer_spain_segunda_division",
-        "soccer_germany_bundesliga", "soccer_germany_bundesliga2",
-        "soccer_italy_serie_a", "soccer_italy_serie_b",
-        "soccer_france_ligue_one", "soccer_france_ligue_two",
+        "soccer_epl",
+        "soccer_efl_champ",
+        "soccer_spain_la_liga",
+        "soccer_spain_segunda_division",
+        "soccer_germany_bundesliga",
+        "soccer_germany_bundesliga2",
+        "soccer_italy_serie_a",
+        "soccer_italy_serie_b",
+        "soccer_france_ligue_one",
+        "soccer_france_ligue_two",
         "soccer_turkey_super_league",
         "soccer_netherlands_eredivisie",
         "soccer_belgium_first_div",
     ]
-    
+
     @field_validator("IYZICO_BASE_URL", mode="before")
     @classmethod
     def sanitize_iyzico_url(cls, v: str) -> str:
@@ -1787,12 +1880,16 @@ class Settings(BaseSettings):
             return v
         return v.replace("https://", "").replace("http://", "").rstrip("/")
 
-    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @field_validator("ALLOWED_ORIGINS", "TRUSTED_PROXIES", mode="before")
     @classmethod
-    def parse_allowed_origins(cls, v: str | list[str]) -> list[str]:
+    def parse_comma_separated_list(cls, v: Any) -> list[str]:
+        # Eğer .env'den string geldiyse virgülle ayırıp temizle
         if isinstance(v, str):
-            return [i.strip() for i in v.split(",")]
-        return v
+            return [i.strip() for i in v.split(",") if i.strip()]
+        # Zaten listeyse (default değer) olduğu gibi bırak
+        if isinstance(v, list):
+            return v
+        return []
 
     model_config = {
         "env_file": ".env",
@@ -1828,10 +1925,15 @@ class MongoManager:
 
     async def connect(self) -> None:
         """Baglanti kur ve indeksleri olustur."""
-        self._client = AsyncIOMotorClient(
-            settings.MONGO_URI, 
-            tlsAllowInvalidCertificates=settings.MONGO_TLS_SKIP_VERIFY
-        )
+
+        # TLS/SSL parametrelerini sadece gerekiyorsa dinamik olarak ekle
+        connection_kwargs = {}
+        if "+srv" in settings.MONGO_URI or "tls=true" in settings.MONGO_URI.lower():
+            connection_kwargs["tlsAllowInvalidCertificates"] = (
+                settings.MONGO_TLS_SKIP_VERIFY
+            )
+
+        self._client = AsyncIOMotorClient(settings.MONGO_URI, **connection_kwargs)
         self._db = self._client.get_default_database()
 
         # Baglanti testi
@@ -1852,19 +1954,19 @@ class MongoManager:
         await db.matches.create_index("odds.h2h.draw")
         await db.matches.create_index("odds.h2h.away")
         await db.matches.create_index("league_key")
-        
+
         # Benzerlik aramasi (Similarity Search) icin bilesik indeks
-        await db.matches.create_index([
-            ("odds.h2h.home", 1),
-            ("odds.h2h.draw", 1),
-            ("odds.h2h.away", 1)
-        ])
-        
-        await db.matches.create_index([
-            ("sport", 1),
-            ("league_key", 1),
-            ("commence_time", -1),
-        ])
+        await db.matches.create_index(
+            [("odds.h2h.home", 1), ("odds.h2h.draw", 1), ("odds.h2h.away", 1)]
+        )
+
+        await db.matches.create_index(
+            [
+                ("sport", 1),
+                ("league_key", 1),
+                ("commence_time", -1),
+            ]
+        )
         await db.matches.create_index([("status", 1), ("commence_time", -1)])
 
         # users koleksiyonu
@@ -1899,51 +2001,54 @@ mongo = MongoManager()
 
 --- DOSYA: core\logger.py ---
 import logging
-import json
+import orjson
 import sys
 from datetime import datetime
-from typing import Any
+
 
 class JsonFormatter(logging.Formatter):
-    """Logs as JSON objects."""
-    
     def format(self, record: logging.LogRecord) -> str:
         log_record = {
             "timestamp": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
             "level": record.levelname,
             "message": record.getMessage(),
             "module": record.module,
-            "logger": record.name
+            "logger": record.name,
         }
-        
-        # Add extra fields if present
         if hasattr(record, "extra_fields"):
             log_record.update(record.extra_fields)
-            
-        return json.dumps(log_record)
+
+        # orjson.dumps byte döner, .decode() ile string'e çeviriyoruz.
+        # OPTION_SERIALIZE_DATETIME sayesinde datetime nesneleri otomatik çözülür.
+        return orjson.dumps(
+            log_record, option=orjson.OPT_INDENT_2
+        ).decode("utf-8")
+
 
 import logging.handlers
 import queue
+
 
 def setup_logging():
     """Configures the root logger for JSON output with a non-blocking QueueHandler."""
     # 1. Base Handler (stdout)
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(JsonFormatter())
-    
+
     # 2. Queue for Async Logging (Faz 6 Fix: Senkron loglama darboğazı engellendi)
     log_queue = queue.Queue(-1)
     queue_handler = logging.handlers.QueueHandler(log_queue)
-    
+
     # 3. Listener to process logs in background
     listener = logging.handlers.QueueListener(log_queue, stream_handler)
     listener.start()
-    
+
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.handlers = [queue_handler]
-    
+
     return logger
+
 
 # Singleton logger instance
 logger = setup_logging()
@@ -2021,15 +2126,17 @@ class RedisManager:
         self._client: aioredis.Redis | None = None
 
     async def connect(self) -> None:
-        """Redis bagantisini kur ve test et."""
         self._client = aioredis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
             max_connections=20,
+            socket_connect_timeout=5,  # ← bağlantı timeout
+            socket_timeout=5,  # ← komut timeout
+            retry_on_timeout=True,  # ← timeout'ta retry yap
+            health_check_interval=30,  # ← 30s'de bir ping at, bağlantıyı canlı tut
         )
-        # Baglanti testi
         await self._client.ping()
-        logger.info("Redis baglantisi kuruldu: %s", settings.REDIS_URL)
+        logger.info("Redis bağlantısı kuruldu: %s", settings.REDIS_URL)
 
     def get_client(self) -> aioredis.Redis:
         """Aktif Redis istemcisini dondurur."""
@@ -2054,7 +2161,7 @@ redis_manager = RedisManager()
 
 
 --- DOSYA: frontend\.env.local ---
-NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
+NEXT_PUBLIC_API_URL=http://localhost:8000
 
 
 --- DOSYA: frontend\CLAUDE.md ---
@@ -2407,21 +2514,32 @@ export default function Home() {
   const handleFetchAnalysis = async () => {
     if (!selectedMatch) return;
     setLoadingAnalysis(true);
+    setSimilarMatches([]); // Clear previous results to show loading state clearly
+    
     try {
+      console.log(`Analiz başlatılıyor: ${selectedMatch.external_id} | Limit: ${limit}`);
       const res = await fetch(`${API_URL}/api/v1/football/analysis/similar/${selectedMatch.external_id}?limit=${limit}`, {
         credentials: "include",
       });
 
-      const data = await res.json();
-
       if (!res.ok) {
-        const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
-        throw new Error((typeof errMsg === "string" ? errMsg : null) || "Analiz yapılamadı.");
+        const errorData = await res.json().catch(() => ({ detail: "Bilinmeyen bir hata oluştu" }));
+        const errMsg = Array.isArray(errorData.detail) ? errorData.detail.map((e: any) => e.msg).join(", ") : errorData.detail;
+        throw new Error(errMsg || "Analiz yapılamadı.");
       }
 
-      setSimilarMatches(data);
+      const data = await res.json();
+      console.log("Backend'den gelen veri:", data);
+      
+      // Backend bazen direkt liste, bazen {data: [...]} şeklinde dönebilir. Her iki durumu da handle edelim.
+      const resultList = Array.isArray(data) ? data : (data.results || data.data || []);
+      setSimilarMatches(resultList);
+      
+      if (resultList.length === 0) {
+        console.warn("Benzer maç bulunamadı.");
+      }
     } catch (err: any) {
-      console.error(err);
+      console.error("Analiz Hatası:", err);
       alert(err.message || "Analiz hatası");
       setSimilarMatches([]);
     } finally {
@@ -2594,7 +2712,7 @@ export default function Home() {
             />
           </div>
 
-          {similarMatches.length > 0 && (
+          {similarMatches.length > 0 ? (
             <div className="grid grid-cols-1 gap-8 mt-4">
               <div className="glass rounded-[2rem] overflow-hidden card-shadow">
                 <SimilarMatchesTable results={similarMatches} />
@@ -2604,6 +2722,14 @@ export default function Home() {
                 <h3 className="text-lg font-bold text-white mb-6">İstatistik Özeti</h3>
                 <SummaryStats results={similarMatches} />
               </div>
+            </div>
+          ) : !loadingAnalysis && (
+            <div className="mt-8 glass rounded-[2rem] p-12 flex flex-col items-center justify-center gap-4 card-shadow border border-white/5 opacity-60">
+               <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-slate-500"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+               </div>
+               <p className="text-slate-500 text-xs font-black uppercase tracking-widest text-center">Veritabanında benzer oranlara sahip maç bulunamadı.</p>
+               <p className="text-slate-700 text-[10px] font-bold uppercase tracking-tight text-center max-w-[250px]">Lütfen farklı bir maç seçin veya benzerlik limitini değiştirerek tekrar deneyin.</p>
             </div>
           )}
         </section>
@@ -2874,6 +3000,7 @@ export default function Login() {
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { CheckIcon } from "@heroicons/react/24/solid";
 import { API_URL } from "@/config/constants";
 
@@ -2888,6 +3015,7 @@ export default function PricingPage() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [loading, setLoading] = useState(true);
   const [processingId, setProcessingId] = useState<string | null>(null);
+  const router = useRouter();
 
   useEffect(() => {
     const fetchPlans = async () => {
@@ -2915,8 +3043,8 @@ export default function PricingPage() {
       });
       
       if (!authRes.ok) {
-        // Redirect to register with plan_id
-        window.location.href = `/register?plan=${planId}`;
+        // Redirect to register with plan_id using Next.js router for better UX
+        router.push(`/register?plan=${planId}`);
         return;
       }
 
@@ -2931,6 +3059,7 @@ export default function PricingPage() {
 
       const data = await res.json();
       if (res.ok && data.checkout_url) {
+        // Iyzico checkout is an external URL, so window.location is correct here
         window.location.href = data.checkout_url;
       } else {
         const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
@@ -3315,7 +3444,8 @@ function RegisterContent() {
 
   useEffect(() => {
     if (!planId) {
-      router.push("/pricing");
+      // Use replace instead of push to avoid "Back Button Trap"
+      router.replace("/pricing");
     }
   }, [planId, router]);
 
@@ -3410,11 +3540,17 @@ function RegisterContent() {
           </button>
         </form>
 
-        <div className="mt-10 text-center">
+        <div className="mt-10 text-center space-y-4">
           <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest">
             Zaten hesabın var mı?{" "}
             <Link href="/login" className="text-primary hover:underline underline-offset-4 decoration-2">Giriş Yap</Link>
           </p>
+          <div className="pt-4">
+            <Link href="/pricing" className="text-slate-600 hover:text-slate-400 text-[10px] font-black uppercase tracking-widest transition-colors flex items-center justify-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+              Planlara Geri Dön
+            </Link>
+          </div>
         </div>
       </div>
     </div>
@@ -4275,7 +4411,7 @@ export default function UpcomingMatchesTable({ matches, selectedMatchId, onSelec
 
 
 --- DOSYA: frontend\src\config\constants.ts ---
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 
 --- DOSYA: frontend\src\types\index.ts ---
@@ -4375,11 +4511,14 @@ Yeni yaklasim (Sliding Window — Redis Sorted Set):
 
 import time
 import uuid
+import logging
 
 from fastapi import Request, HTTPException
 from core.config import TierLimits
 from core.redis_client import redis_manager
 from schemas.auth import UserTier
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
@@ -4441,12 +4580,13 @@ class RateLimiter:
                 )
         except HTTPException:
             raise
-        except Exception:
-            # Redis arizasi durumunda guvenlik icin istegi reddet (fail-closed) - Faz 1
-            raise HTTPException(
-                status_code=503,
-                detail="Rate limiter servisi su an kullanilamiyor. Lutfen daha sonra tekrar deneyin."
+        except Exception as e:
+            # Redis geçici olarak erişilemez — fail-open: sistemi çökertme
+            logger.warning(
+                "Rate limiter Redis erişilemez, istek geçiriliyor",
+                extra={"extra_fields": {"identifier": identifier, "error": str(e)}}
             )
+            return
 
 
 --- DOSYA: middleware\security.py ---
@@ -4462,26 +4602,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Adds security headers to every response."""
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        from core.config import settings
         response = await call_next(request)
         
-        # HSTS (HTTP Strict Transport Security) - 1 year
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        
-        # X-Content-Type-Options
+        # Her ortamda güvenli olan header'lar
         response.headers["X-Content-Type-Options"] = "nosniff"
-        
-        # X-Frame-Options (Prevent clickjacking)
         response.headers["X-Frame-Options"] = "DENY"
-        
-        # X-XSS-Protection
         response.headers["X-XSS-Protection"] = "1; mode=block"
-        
-        # Referrer-Policy
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         
-        # Content-Security-Policy (Basic)
-        # In a real app, this should be more specific
-        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none';"
+        # Sadece production'da HSTS ve CSP
+        if settings.ENVIRONMENT == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+            response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none';"
         
         return response
 
@@ -4658,6 +4791,67 @@ class MatchRepository:
         """Verilen sorguya uyan mac sayisini dondurur."""
         return await self.collection.count_documents(query)
 
+    async def get_by_external_ids(self, external_ids: list[str]) -> list[dict]:
+        """Birden fazla ID'yi tek seferde sorgular (Faz 6 Fix: N+1 engelleme)."""
+        cursor = self.collection.find(
+            {"external_id": {"$in": external_ids}},
+            {"external_id": 1, "updated_at": 1}
+        )
+        return await cursor.to_list(length=len(external_ids))
+
+    async def find_matches_by_odds_range(
+        self,
+        home: float,
+        draw: float,
+        away: float,
+        limit: int = 2000
+    ) -> list[dict]:
+        """Oran aralığına göre tamamlanmış maçları getirir (Benzerlik analizi için)."""
+        # Basit ve güvenilir $or sorgusu (Atlas uyumlu)
+        query = {
+            "status": {"$regex": f"^{MatchStatus.COMPLETED.value}$", "$options": "i"},
+            "$or": [
+                {
+                    "odds.h2h.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
+                    "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
+                    "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
+                },
+                {
+                    "odds.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
+                    "odds.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
+                    "odds.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
+                }
+            ]
+        }
+        
+        from core.logger import logger
+        logger.info(f"Benzerlik sorgusu baslatildi: H:{home} D:{draw} A:{away}")
+        
+        cursor = self.collection.find(query).limit(limit)
+        docs = await cursor.to_list(length=limit)
+        
+        logger.info(f"Sorgu tamamlandi. Bulunan ham mac sayisi: {len(docs)}")
+        return docs
+
+    async def bulk_upsert(self, entities: list[MatchEntity]) -> dict:
+        """Toplu mac guncelleme/ekleme (Faz 6 Fix: Mimari uyum)."""
+        if not entities:
+            return {"upserted": 0, "modified": 0}
+            
+        operations = [
+            UpdateOne(
+                {"external_id": e.external_id},
+                {"$set": e.model_dump()},
+                upsert=True
+            ) for e in entities
+        ]
+        
+        result = await self.collection.bulk_write(operations, ordered=False)
+        return {
+            "upserted": result.upserted_count,
+            "modified": result.modified_count
+        }
+
 
 --- DOSYA: repositories\user_repository.py ---
 """Kullanici veri erisim katmani."""
@@ -4814,16 +5008,14 @@ from middleware.rate_limiter import RateLimiter
 from schemas.auth import UserInDB
 from services.analysis_service import AnalysisService
 from utils.dependencies import get_analysis_service, get_current_active_user
-from utils.cache import cache_response
 
 router = APIRouter(prefix="/api/v1/football/analysis", tags=["Football Analysis"])
 
 
-@router.get("/similar/{match_id}", dependencies=[Depends(RateLimiter())])
-@cache_response(expire=600, key_prefix="analysis")
+@router.get("/similar/{match_id}", dependencies=[Depends(get_current_active_user), Depends(RateLimiter())])
 async def get_similar_matches(
     match_id: str,
-    limit: int | None = Query(None, ge=1, le=20, description="PRO/ELITE kullanicilar icin ozel limit belirleme"),
+    limit: int | None = Query(None, ge=1, le=100),
     current_user: UserInDB = Depends(get_current_active_user),
     service: AnalysisService = Depends(get_analysis_service)
 ):
@@ -4858,7 +5050,15 @@ Endpoints:
 
 import hashlib
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    BackgroundTasks,
+    Response,
+    Request,
+)
 
 from clients.email_client import email_client
 from core.config import settings
@@ -4906,6 +5106,9 @@ async def register(
         email_client.send_verification_email, user.email, verify_url
     )
 
+    if not user.id:
+        raise HTTPException(status_code=500, detail="User ID generation failed.")
+
     access_token = auth_service.create_access_token(
         user.id, user.tier, user.is_superuser
     )
@@ -4920,16 +5123,16 @@ async def register(
         value=access_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+        samesite="lax",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600,
     )
 
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
@@ -4948,11 +5151,11 @@ async def login(
     if await auth_service.is_account_locked(credentials.email):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Çok fazla başarısız deneme. Hesabınız 15 dakika süreyle kilitlendi."
+            detail="Çok fazla başarısız deneme. Hesabınız 15 dakika süreyle kilitlendi.",
         )
 
     user = await auth_service.repo.get_by_email(credentials.email)
-    if not user or not auth_service.verify_password(
+    if not user or not await auth_service.verify_password(
         credentials.password, user.hashed_password
     ):
         await auth_service.record_login_failure(credentials.email)
@@ -4960,6 +5163,9 @@ async def login(
 
     # Success: Reset attempts
     await auth_service.reset_login_attempts(credentials.email)
+
+    if not user.id:
+        raise HTTPException(status_code=500, detail="User ID is missing in database.")
 
     access_token = auth_service.create_access_token(
         user.id, user.tier, user.is_superuser
@@ -4975,16 +5181,16 @@ async def login(
         value=access_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+        samesite="lax",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600,
     )
 
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
@@ -5004,33 +5210,34 @@ async def refresh_access_token(
 
     Eski refresh token otomatik olarak iptal edilir (token rotation).
     """
-    refresh_token = (body.refresh_token if body else None) or request.cookies.get("refresh_token")
-    
+    refresh_token = (body.refresh_token if body else None) or request.cookies.get(
+        "refresh_token"
+    )
+
     if not refresh_token:
-        raise HTTPException(
-            status_code=401, detail="Refresh token bulunamadi."
-        )
+        raise HTTPException(status_code=401, detail="Refresh token bulunamadi.")
 
     # Distributed Lock (Faz 6 Fix: Race Condition / Token Cloning)
     from core.redis_client import redis_manager
+
     redis = redis_manager.get_client()
     lock_key = f"lock:refresh:{hashlib.md5(refresh_token.encode()).hexdigest()}"
-    
+
     async with redis.lock(lock_key, timeout=10):
         token_data = await auth_service.verify_refresh_token(refresh_token)
         if not token_data:
             raise HTTPException(
                 status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
             )
-    
+
         # Rotate: revoke old, issue new pair
         await auth_service.revoke_refresh_token(refresh_token)
-    new_access = auth_service.create_access_token(
-        token_data.user_id, token_data.tier, token_data.is_superuser
-    )
-    new_refresh = await auth_service.create_refresh_token(
-        token_data.user_id, token_data.tier, token_data.is_superuser
-    )
+        new_access = auth_service.create_access_token(
+            token_data.user_id, token_data.tier, token_data.is_superuser
+        )
+        new_refresh = await auth_service.create_refresh_token(
+            token_data.user_id, token_data.tier, token_data.is_superuser
+        )
 
     # Cookie tabanli auth (Faz 1)
     is_prod = settings.ENVIRONMENT == "production"
@@ -5039,16 +5246,16 @@ async def refresh_access_token(
         value=new_access,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60
+        samesite="lax",
+        max_age=settings.JWT_ACCESS_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
         key="refresh_token",
         value=new_refresh,
         httponly=True,
         secure=is_prod,
-        samesite="strict",
-        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600
+        samesite="lax",
+        max_age=settings.JWT_REFRESH_EXPIRE_DAYS * 24 * 3600,
     )
 
     return TokenResponse(access_token=new_access, refresh_token=new_refresh)
@@ -5061,12 +5268,11 @@ async def refresh_access_token(
 async def logout(
     request: Request,
     response: Response,
-    current_user: UserInDB = Depends(get_current_active_user),
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Refresh token'i iptal eder ve cookieleri temizler."""
     refresh_token = request.cookies.get("refresh_token")
-    
+
     if refresh_token:
         await auth_service.revoke_refresh_token(refresh_token)
     # Cookieleri temizle (Faz 6 Fix: Ghost Cookies)
@@ -5075,11 +5281,11 @@ async def logout(
         "path": "/",
         "httponly": True,
         "secure": is_prod,
-        "samesite": "strict",
+        "samesite": "lax",
     }
     response.delete_cookie("access_token", **cookie_params)
     response.delete_cookie("refresh_token", **cookie_params)
-    
+
     return {"message": "Basariyla cikis yapildi."}
 
 
@@ -5148,6 +5354,9 @@ async def change_password(
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Mevcut sifreyi dogrulayarak yeni sifre belirler."""
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+        
     success = await auth_service.change_password(
         current_user.id, body.current_password, body.new_password
     )
@@ -5161,6 +5370,9 @@ async def change_password(
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: UserInDB = Depends(get_current_active_user)):
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+        
     return UserResponse(
         id=current_user.id,
         email=current_user.email,
@@ -5190,6 +5402,9 @@ async def request_email_change(
             status_code=400, detail="Bu email adresi zaten kullaniliyor."
         )
 
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+
     token = auth_service.create_email_change_token(current_user.id, body.new_email)
     confirm_url = f"{settings.FRONTEND_URL}/confirm-email-change?token={token}"
 
@@ -5212,7 +5427,9 @@ async def confirm_email_change(
         )
     return {"message": "Email adresiniz basariyla guncellendi."}
 
+
 # ── Account Deletion (GDPR) ───────────────────────────────────────────────────
+
 
 @router.delete("/account", status_code=status.HTTP_200_OK)
 async def delete_account(
@@ -5222,17 +5439,20 @@ async def delete_account(
     auth_service: AuthService = Depends(get_auth_service),
 ):
     """Kullanicinin hesabini ve verilerini kalici olarak siler (GDPR)."""
+    if not current_user.id:
+        raise HTTPException(status_code=401, detail="User identity is incomplete.")
+
     success = await auth_service.delete_account(current_user.id, body.password)
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Sifre hatali veya hesap silinemedi."
+            detail="Sifre hatali veya hesap silinemedi.",
         )
-    
+
     # Cookieleri temizle
     response.delete_cookie("access_token")
     response.delete_cookie("refresh_token")
-    
+
     return {"message": "Hesabiniz ve tum verileriniz basariyla silindi."}
 
 
@@ -5314,6 +5534,9 @@ async def create_checkout_session(
 
     try:
         ip = request.client.host if request.client else "127.0.0.1"
+        if not current_user.id:
+            raise HTTPException(status_code=401, detail="User identity is incomplete.")
+
         checkout_url = await billing_service.create_checkout_session(
             user_id=current_user.id,
             user_email=current_user.email,
@@ -5444,13 +5667,11 @@ from middleware.rate_limiter import RateLimiter
 from schemas.match import MatchResponse, MatchListResponse
 from services.match_service import MatchService
 from utils.dependencies import get_match_service
-from utils.cache import cache_response
 
 router = APIRouter(prefix="/api/v1/football/matches", tags=["Football Matches"])
 
 
 @router.get("/", response_model=MatchListResponse, dependencies=[Depends(RateLimiter())])
-@cache_response(expire=300, key_prefix="matches")
 async def get_upcoming_matches(
     league: str | None = Query(None, description="Lig koduna gore filtrele (orn: soccer_epl)"),
     page: int = Query(1, ge=1, description="Sayfa numarasi"),
@@ -5480,7 +5701,6 @@ async def get_upcoming_matches(
 
 
 @router.get("/leagues", response_model=list[str], dependencies=[Depends(RateLimiter())])
-@cache_response(expire=3600, key_prefix="leagues")
 async def get_leagues(service: MatchService = Depends(get_match_service)):
     """Sistemde aktif verisi bulunan ligleri listeler."""
     return await service.get_available_leagues(sport="football")
@@ -5550,7 +5770,7 @@ class UserLogin(BaseModel):
 
 
 class UserInDB(BaseModel):
-    id: str = Field(default="", alias="_id")
+    id: str | None = Field(default=None, alias="_id")
     email: str
     display_name: str
     hashed_password: str
@@ -5644,7 +5864,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, GetCoreSchemaHandler
+from pydantic import BaseModel, Field, GetCoreSchemaHandler, model_validator
 from pydantic_core import core_schema
 from bson import ObjectId
 
@@ -5712,6 +5932,27 @@ class MatchOdds(BaseModel):
     btts: BTTSOdds | None = None
 
     model_config = {"extra": "allow"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def wrap_h2h_odds(cls, data: Any) -> Any:
+        """Eski format (flat odds) verilerini yeni formata (nested h2h) tasir."""
+        # Eğer veri zaten bir MatchOdds nesnesiyse veya dict değilse güvenli kontrol
+        if not isinstance(data, dict):
+            if hasattr(data, "home") and hasattr(data, "draw") and getattr(data, "h2h", None) is None:
+                 return {"h2h": {"home": getattr(data, "home"), "draw": getattr(data, "draw"), "away": getattr(data, "away", None)}}
+            return data
+            
+        # Eğer h2h yoksa ama flat oranlar (home, draw, away) varsa, h2h içine taşı
+        if "h2h" not in data or data["h2h"] is None:
+            home = data.get("home")
+            draw = data.get("draw")
+            away = data.get("away")
+            
+            if home is not None and draw is not None and away is not None:
+                data["h2h"] = {"home": home, "draw": draw, "away": away}
+                
+        return data
 
 
 # ═══════════════════════════════════════════════
@@ -5790,6 +6031,7 @@ class MatchInDB(MatchEntity):
     model_config = {
         "populate_by_name": True,
         "arbitrary_types_allowed": True,
+        "extra": "ignore",
     }
 
 
@@ -5877,7 +6119,7 @@ from utils.cache import cache_response
 
 logger = logging.getLogger(__name__)
 
-DISTANCE_THRESHOLD = 3.0  # Bu degerin ustundeki maclar zaten benzer sayilmaz
+DISTANCE_THRESHOLD = 1.5  # Analiz kalitesi için hassasiyeti artırdık (Öneri: 1.5)
 
 
 class SimilarMatchResult(BaseModel):
@@ -5892,7 +6134,7 @@ class AnalysisService:
     def __init__(self, match_repo: MatchRepository):
         self.repo = match_repo
 
-    @cache_response(ttl_seconds=3600, prefix="analysis:similar")
+    @cache_response(expire=3600, key_prefix="analysis:similar")
     async def find_similar_matches(
         self,
         target_match_id: str,
@@ -5962,39 +6204,30 @@ class AnalysisService:
         away: float,
         limit: int,
     ) -> list[SimilarMatchResult]:
-        """Kabaca filtrelenmis veriyi DB'den ceker, mesafeyi Python'da hesaplar (Faz 6 Fix)."""
+        """Repository üzerinden filtrelenmiş veriyi çeker, mesafeyi Python'da hesaplar."""
         
-        # 1. MongoDB'den sadece kabaca filtrelenmis veriyi cek (İndeksli alanlar üzerinden)
-        # Bu sayede DB tarafında COLLSCAN ve In-Memory Sort engellenir.
-        pipeline = [
-            {"$match": {"status": "completed"}},
-            {
-                "$match": {
-                    "odds.h2h.home": {"$gte": home - 1.0, "$lte": home + 1.0},
-                    "odds.h2h.draw": {"$gte": draw - 1.0, "$lte": draw + 1.0},
-                    "odds.h2h.away": {"$gte": away - 1.0, "$lte": away + 1.0},
-                }
-            },
-            # Bellek dostu limit: Cok fazla veri gelirse bile hard cap koy (Ornegin 2000)
-            {"$limit": 2000}
-        ]
-
-        db = self.repo.collection.database
-        cursor = db.matches.aggregate(pipeline)
-        docs = await cursor.to_list(length=2000)
+        # Rule 12 Fix: Raw DB erişimi yerine repository metodu kullanıldı
+        docs = await self.repo.find_matches_by_odds_range(
+            home=home, draw=draw, away=away, limit=2000
+        )
 
         def process_docs(docs_list):
             results_local = []
             for doc in docs_list:
                 try:
-                    h = doc["odds"]["h2h"]["home"]
-                    d = doc["odds"]["h2h"]["draw"]
-                    a = doc["odds"]["h2h"]["away"]
+                    # Robust odds retrieval: both nested (h2h) and flat structures
+                    odds_data = doc.get("odds", {})
+                    h2h = odds_data.get("h2h", {})
                     
-                    # Euclidean mesafe (Python tarafında)
-                    dist = math.sqrt(
-                        (h - home)**2 + (d - draw)**2 + (a - away)**2
-                    )
+                    h = h2h.get("home") or odds_data.get("home")
+                    d = h2h.get("draw") or odds_data.get("draw")
+                    a = h2h.get("away") or odds_data.get("away")
+
+                    if h is None or d is None or a is None:
+                        continue
+
+                    # Oklid mesafesi (Euclidean Distance)
+                    dist = ((float(h) - home)**2 + (float(d) - draw)**2 + (float(a) - away)**2)**0.5
                     
                     if dist < DISTANCE_THRESHOLD:
                         sim_pct = max(0.0, 100.0 - (dist * 33.3))
@@ -6005,7 +6238,8 @@ class AnalysisService:
                                 similarity_percentage=round(sim_pct, 1),
                             )
                         )
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Mac dokumani dogrulama hatasi: {str(e)} | Match ID: {doc.get('external_id')}")
                     continue
             
             # Python tarafında sıralama (MongoDB In-memory sort limit sorunu yok)
@@ -6096,6 +6330,8 @@ class AuthService:
     # ── Access token ──────────────────────────────────────────────────────────
 
     def create_access_token(self, user_id: str, tier: UserTier, is_superuser: bool = False) -> str:
+        if not user_id:
+            raise ValueError("User ID is required for access token creation")
         expire = datetime.utcnow() + timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES)
         to_encode = {
             "sub": user_id,
@@ -6128,6 +6364,8 @@ class AuthService:
         self, user_id: str, tier: UserTier, is_superuser: bool = False
     ) -> str:
         """Refresh token uretir ve JTI'sini Redis'e yazar (iptal edilebilir)."""
+        if not user_id:
+            raise ValueError("User ID is required for refresh token creation")
         jti = secrets.token_hex(32)
         expire_seconds = settings.JWT_REFRESH_EXPIRE_DAYS * 86400
         expire = datetime.utcnow() + timedelta(days=settings.JWT_REFRESH_EXPIRE_DAYS)
@@ -6333,6 +6571,7 @@ class AuthService:
 import json
 import uuid
 import logging
+import asyncio
 from typing import Any
 
 from core.pricing import PLANS
@@ -6373,7 +6612,7 @@ class BillingService:
         """Kayit olmayan kullanici icin odeme baslatir ve verileri gecici olarak saklar."""
         temp_id = f"guest_{uuid.uuid4().hex}"
         # Sifreyi hashleyip saklayalim
-        reg_data["hashed_password"] = pwd_context.hash(reg_data["password"])
+        reg_data["hashed_password"] = await asyncio.to_thread(pwd_context.hash, reg_data["password"])
         del reg_data["password"]
         
         await self.redis.setex(f"pending_reg:{temp_id}", 3600, json.dumps(reg_data))
@@ -6450,7 +6689,7 @@ class MatchService:
     def __init__(self, repo: MatchRepository):
         self.repo = repo
 
-    @cache_response(ttl_seconds=300, prefix="matches:upcoming")
+    @cache_response(expire=300, key_prefix="matches:upcoming")
     async def get_upcoming_matches(
         self,
         sport: str = "football",
@@ -6461,7 +6700,7 @@ class MatchService:
         """Yaklasan maclari getirir (5 dakika cache)."""
         return await self.repo.get_upcoming_matches(sport, league_key, limit, skip)
 
-    @cache_response(ttl_seconds=3600, prefix="matches:leagues")
+    @cache_response(expire=3600, key_prefix="matches:leagues")
     async def get_available_leagues(self, sport: str = "football") -> list[str]:
         """Sistemdeki ligleri getirir (1 saat cache)."""
         return await self.repo.get_available_leagues(sport)
@@ -6506,7 +6745,7 @@ class BasePaymentProvider(ABC):
 from core.config import settings
 from services.payment.iyzico_provider import IyzicoProvider
 from services.payment.stripe_provider import StripeProvider
-from services.payment.base_provider import PaymentProvider
+from services.payment.base import BasePaymentProvider
 
 class PaymentProviderFactory:
     """Payment providerlar icin Strategy Pattern Factory."""
@@ -6517,7 +6756,7 @@ class PaymentProviderFactory:
     }
 
     @classmethod
-    def get_provider(cls, provider_name: str) -> PaymentProvider:
+    def get_provider(cls, provider_name: str) -> BasePaymentProvider:
         provider_class = cls._providers.get(provider_name.lower())
         if not provider_class:
             raise ValueError(f"Desteklenmeyen odeme saglayicisi: {provider_name}")
@@ -6760,6 +6999,7 @@ from clients.odds_api_client import OddsAPIClient
 from core.config import settings
 from core.database import mongo
 from core.redis_client import redis_manager
+from repositories.match_repository import MatchRepository
 from utils.lock import distributed_lock
 
 logger = logging.getLogger(__name__)
@@ -6791,13 +7031,14 @@ async def fetch_upcoming_matches() -> None:
 
         client = OddsAPIClient()
         db = mongo.get_db()
+        repo = MatchRepository(db)
 
         total_new = 0
         total_skipped = 0
 
         for league_key in settings.TARGET_LEAGUES:
             try:
-                new, skipped = await _fetch_league(client, adapter, db, league_key)
+                new, skipped = await _fetch_league(client, adapter, repo, league_key)
                 total_new += new
                 total_skipped += skipped
             except QuotaExhaustedError:
@@ -6822,7 +7063,7 @@ async def fetch_upcoming_matches() -> None:
 async def _fetch_league(
     client: OddsAPIClient,
     adapter: FootballAdapter,
-    db,
+    repo: MatchRepository,
     league_key: str,
 ) -> tuple[int, int]:
     """Tek bir lig icin yaklasan maclari ceker ve filtreler.
@@ -6845,20 +7086,28 @@ async def _fetch_league(
     if not entities:
         return (0, 0)
 
-    # Zaten guncel olanlari filtrele (kota optimizasyonu)
+    # Zaten guncel olanlari filtrele (Faz 6 Fix: N+1 engellendi)
+    all_ids = [e.external_id for e in entities]
+    
+    # Sınırsız $in sorgusu yerine chunking yapısı (Faz 6 Fix: MongoDB intiharini engelle)
+    chunk_size = 500
+    existing_docs = []
+    for i in range(0, len(all_ids), chunk_size):
+        chunk = all_ids[i:i + chunk_size]
+        docs = await repo.get_by_external_ids(chunk)
+        existing_docs.extend(docs)
+        
+    existing_map = {doc["external_id"]: doc.get("updated_at") for doc in existing_docs}
+
     freshness_cutoff = datetime.now(timezone.utc) - timedelta(hours=SKIP_IF_FRESH_HOURS)
     entities_to_upsert = []
     skipped = 0
 
     for entity in entities:
-        existing = await db.matches.find_one(
-            {"external_id": entity.external_id},
-            {"updated_at": 1}
-        )
+        existing_updated = existing_map.get(entity.external_id)
         
-        if existing:
-            existing_updated = existing.get("updated_at")
-            if existing_updated and existing_updated.replace(tzinfo=timezone.utc) > freshness_cutoff:
+        if existing_updated:
+            if existing_updated.replace(tzinfo=timezone.utc) > freshness_cutoff:
                 skipped += 1
                 continue
         
@@ -6866,7 +7115,7 @@ async def _fetch_league(
 
     # Upsert
     if entities_to_upsert:
-        await _upsert_to_db(entities_to_upsert)
+        await _upsert_to_db(repo, entities_to_upsert)
 
     logger.info(
         "Lig [%s]: %d yeni/guncellenen, %d atlanan.",
@@ -6880,35 +7129,20 @@ async def _fetch_league(
 # ═══════════════════════════════════════════════
 
 
-async def _upsert_to_db(entities: list) -> None:
-    """MatchEntity listesini MongoDB'ye toplu upsert yapar."""
-    from pymongo import UpdateOne
+async def _upsert_to_db(repo: MatchRepository, entities: list) -> None:
+    """MatchEntity listesini MatchRepository uzerinden toplu upsert yapar (Faz 6 Fix)."""
+    if not entities:
+        return
 
-    db = mongo.get_db()
-    operations = []
-
-    def _get_docs(entities_list):
-        return [e.model_dump() for e in entities_list]
-
-    # Faz 6 Fix: Pydantic model_dump (CPU-intensive) thread'e alindi
-    docs = await asyncio.to_thread(_get_docs, entities)
-
-    for i, entity in enumerate(entities):
-        operations.append(
-            UpdateOne(
-                {"external_id": entity.external_id},
-                {"$set": docs[i]},
-                upsert=True,
-            )
-        )
-
-    if operations:
-        result = await db.matches.bulk_write(operations, ordered=False)
-        logger.info(
-            "MongoDB upsert: %d eklendi, %d guncellendi.",
-            result.upserted_count,
-            result.modified_count,
-        )
+    # Faz 6 Fix: Bulk islemde Pydantic v2 pydantic-core kullandigi icin thread overhead'ine gerek yok.
+    # 50-100 maclik listeler icin context switch daha maliyetli.
+    result = await repo.bulk_upsert(entities)
+    
+    logger.info(
+        "MatchRepository upsert: %d eklendi, %d guncellendi.",
+        result["upserted"],
+        result["modified"],
+    )
 
 
 async def _invalidate_cache(sport_name: str) -> None:
@@ -6975,7 +7209,9 @@ async def seed_historical_data() -> None:
 
                 entities = adapter.normalize_historical(rows, league_code=league_code)
                 if entities:
-                    await _upsert_to_db(entities)
+                    db = mongo.get_db()
+                    repo = MatchRepository(db)
+                    await _upsert_to_db(repo, entities)
                     total_count += len(entities)
                     logger.info("CSV yuklendi: %s → %d mac.", filename, len(entities))
             except Exception as exc:
@@ -7312,19 +7548,24 @@ def auth_service(mock_user_repo):
 
 
 class TestPasswordHashing:
-    def test_hash_and_verify_succeed(self, auth_service):
+    @pytest.mark.asyncio
+    async def test_hash_and_verify_succeed(self, auth_service):
         plain = "SecurePass123!"
-        hashed = auth_service.get_password_hash(plain)
-        assert auth_service.verify_password(plain, hashed)
+        hashed = await auth_service.get_password_hash(plain)
+        assert await auth_service.verify_password(plain, hashed)
 
-    def test_wrong_password_fails(self, auth_service):
-        hashed = auth_service.get_password_hash("correct_password")
-        assert not auth_service.verify_password("wrong_password", hashed)
+    @pytest.mark.asyncio
+    async def test_wrong_password_fails(self, auth_service):
+        hashed = await auth_service.get_password_hash("correct_password")
+        assert not await auth_service.verify_password("wrong_password", hashed)
 
-    def test_two_hashes_of_same_password_differ(self, auth_service):
+    @pytest.mark.asyncio
+    async def test_two_hashes_of_same_password_differ(self, auth_service):
         """bcrypt uses a random salt each time."""
         pw = "SamePassword1!"
-        assert auth_service.get_password_hash(pw) != auth_service.get_password_hash(pw)
+        hash1 = await auth_service.get_password_hash(pw)
+        hash2 = await auth_service.get_password_hash(pw)
+        assert hash1 != hash2
 
 
 # ─── Access token ─────────────────────────────────────────────────────────────
@@ -7728,30 +7969,41 @@ from core.logger import logger
 
 from pydantic_core import to_jsonable_python
 
+
 def _make_serializable(data: Any) -> Any:
-    """pydantic_core kullanarak veriyi JSON uyumlu hale getirir (Yuksek performans)."""
+    # Performans için pydantic_core'un en hızlı metodunu kullanıyoruz
     try:
-        # Faz 6 Fix: orjson + pydantic_core kombinasyonu ile en hizli serilestirme
         return to_jsonable_python(data)
     except Exception:
-        return data
+        return str(data)  # En kötü ihtimalle string'e çevir ki json.dumps patlamasın
+
+
+
 
 def cache_response(expire: int = 300, key_prefix: str = "cache"):
     """
     Decorator to cache FastAPI endpoint responses in Redis.
     Default expiry: 5 minutes.
     """
+
     def decorator(func: Callable):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            # Generate a unique key based on function name and arguments
+            # Generate a unique key based on function name, args, and kwargs
             key_parts = [key_prefix, func.__name__]
+            
+            # Args (skipping 'self' or 'cls' if it's a method)
+            # func has __qualname__ which contains class name if it's a method
+            start_idx = 1 if '.' in func.__qualname__ else 0
+            for arg in args[start_idx:]:
+                key_parts.append(str(arg))
+
             for k, v in sorted(kwargs.items()):
                 if k == "current_user" and hasattr(v, "tier"):
                     key_parts.append(f"tier:{v.tier}")
                 elif k not in ["auth_service", "current_user", "db", "service"]:
                     key_parts.append(f"{k}:{v}")
-            
+
             cache_key = ":".join(key_parts)
             redis = redis_manager.get_client()
 
@@ -7770,18 +8022,18 @@ def cache_response(expire: int = 300, key_prefix: str = "cache"):
             try:
                 # Faz 6 Fix: orjson.dumps kullanildi (json.dumps'tan cok daha hizli)
                 serializable_result = _make_serializable(result)
-                
+
                 await redis.setex(
-                    cache_key,
-                    expire,
-                    orjson.dumps(serializable_result).decode("utf-8")
+                    cache_key, expire, orjson.dumps(serializable_result).decode("utf-8")
                 )
                 logger.debug(f"Cache stored: {cache_key}")
             except Exception as e:
                 logger.error(f"Cache write error: {str(e)}")
 
             return result
+
         return wrapper
+
     return decorator
 
 
@@ -7797,6 +8049,7 @@ from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 
 from core.database import mongo
+from core.config import settings
 from repositories.match_repository import MatchRepository
 from repositories.user_repository import UserRepository
 from services.analysis_service import AnalysisService
@@ -7860,6 +8113,9 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
         
+    if not user.id:
+        raise credentials_exception
+
     # Request state'ine atayalim ki middleware'ler kullanabilsin
     request.state.user_id = user.id
     request.state.user_tier = user.tier.value
@@ -7872,7 +8128,7 @@ async def get_current_active_user(
     current_user: UserInDB = Depends(get_current_user)
 ) -> UserInDB:
     """Dogrulanmis ve aktif bir kullanici mi diye kontrol eder (Email verify vs.)."""
-    if not current_user.is_verified:
+    if settings.REQUIRE_EMAIL_VERIFICATION and not current_user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="Bu işlem için e-posta adresinizi doğrulamanız gerekmektedir."
@@ -7904,6 +8160,7 @@ async def require_admin(current_user: UserInDB = Depends(get_current_user)) -> U
 """Standardized exception classes and handlers for global error management (Faz 3)."""
 
 from fastapi import Request
+from starlette.background import BackgroundTask
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from core.config import settings
@@ -7997,7 +8254,10 @@ async def global_exception_handler(request: Request, exc: Exception):
             f"*Error:* {error_msg}\n"
             f"*Traceback:* ```{stack_trace[:300]}...```" # Truncate to avoid limit
         )
-        await send_telegram_alert(alert_text)
+        # Faz 6 Fix: Telegram alert'i BackgroundTask ile yolla (Self-DDoS engellendi)
+        background = BackgroundTask(send_telegram_alert, alert_text)
+    else:
+        background = None
     
     return JSONResponse(
         status_code=500,
@@ -8006,7 +8266,8 @@ async def global_exception_handler(request: Request, exc: Exception):
             "message": "An unexpected error occurred. Our team has been notified via Telegram.",
             "detail": None
         },
-        headers=get_cors_headers(request)
+        headers=get_cors_headers(request),
+        background=background
     )
 
 

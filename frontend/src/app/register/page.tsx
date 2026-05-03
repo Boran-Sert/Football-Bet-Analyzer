@@ -15,7 +15,8 @@ function RegisterContent() {
 
   useEffect(() => {
     if (!planId) {
-      router.push("/pricing");
+      // Use replace instead of push to avoid "Back Button Trap"
+      router.replace("/pricing");
     }
   }, [planId, router]);
 
@@ -110,11 +111,17 @@ function RegisterContent() {
           </button>
         </form>
 
-        <div className="mt-10 text-center">
+        <div className="mt-10 text-center space-y-4">
           <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest">
             Zaten hesabın var mı?{" "}
             <Link href="/login" className="text-primary hover:underline underline-offset-4 decoration-2">Giriş Yap</Link>
           </p>
+          <div className="pt-4">
+            <Link href="/pricing" className="text-slate-600 hover:text-slate-400 text-[10px] font-black uppercase tracking-widest transition-colors flex items-center justify-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+              Planlara Geri Dön
+            </Link>
+          </div>
         </div>
       </div>
     </div>

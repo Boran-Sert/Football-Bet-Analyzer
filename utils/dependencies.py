@@ -9,6 +9,7 @@ from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 
 from core.database import mongo
+from core.config import settings
 from repositories.match_repository import MatchRepository
 from repositories.user_repository import UserRepository
 from services.analysis_service import AnalysisService
@@ -72,6 +73,9 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
         
+    if not user.id:
+        raise credentials_exception
+
     # Request state'ine atayalim ki middleware'ler kullanabilsin
     request.state.user_id = user.id
     request.state.user_tier = user.tier.value
@@ -84,7 +88,7 @@ async def get_current_active_user(
     current_user: UserInDB = Depends(get_current_user)
 ) -> UserInDB:
     """Dogrulanmis ve aktif bir kullanici mi diye kontrol eder (Email verify vs.)."""
-    if not current_user.is_verified:
+    if settings.REQUIRE_EMAIL_VERIFICATION and not current_user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
             detail="Bu işlem için e-posta adresinizi doğrulamanız gerekmektedir."
