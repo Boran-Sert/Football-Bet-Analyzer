@@ -1,6 +1,6 @@
 """Analiz ve benzerlik API yonlendiricisi."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Request
 
 from middleware.rate_limiter import RateLimiter
 from schemas.auth import UserInDB
@@ -10,23 +10,18 @@ from utils.dependencies import get_analysis_service, get_current_active_user
 router = APIRouter(prefix="/api/v1/football/analysis", tags=["Football Analysis"])
 
 
-@router.get("/similar/{match_id}", dependencies=[Depends(get_current_active_user), Depends(RateLimiter())])
+@router.get("/similar/{match_id}")
 async def get_similar_matches(
+    request: Request,
     match_id: str,
-    limit: int | None = Query(None, ge=1, le=100),
     current_user: UserInDB = Depends(get_current_active_user),
-    service: AnalysisService = Depends(get_analysis_service)
+    service: AnalysisService = Depends(get_analysis_service),
 ):
-    """
-    Yaklasan bir macin oranlarina en benzeyen gecmis maclari bulur.
-    Kullanicinin tier'ina gore (STANDARD, PRO, ELITE) sonuclar sinirlandirilir.
-    """
+    await RateLimiter()(request)
+
     results = await service.find_similar_matches(
         target_match_id=match_id,
         user_tier=current_user.tier,
         is_superuser=current_user.is_superuser,
-        limit_override=limit
     )
-    
-    # Sonuclari dondur (Bos olabilir, Frontend bunu handle eder)
     return results

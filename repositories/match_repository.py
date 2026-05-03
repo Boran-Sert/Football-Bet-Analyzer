@@ -4,7 +4,6 @@ Veritabani islemlerini (MongoDB) soyutlar. Sadece burada motor kullanilir.
 """
 
 from typing import Any
-from datetime import datetime
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
@@ -30,22 +29,21 @@ class MatchRepository:
         sport: str = "football",
         league_key: str | None = None,
         limit: int = 50,
-        skip: int = 0
+        skip: int = 0,
     ) -> list[MatchInDB]:
         """Yaklasan maclari zamana gore siralayip getirir."""
         query: dict[str, Any] = {"status": MatchStatus.UPCOMING.value, "sport": sport}
         if league_key:
             query["league_key"] = league_key
 
-        cursor = self.collection.find(query).sort("commence_time", 1).skip(skip).limit(limit)
+        cursor = (
+            self.collection.find(query).sort("commence_time", 1).skip(skip).limit(limit)
+        )
         docs = await cursor.to_list(length=limit)
         return [MatchInDB(**doc) for doc in docs]
 
     async def get_completed_matches_for_analysis(
-        self,
-        sport: str = "football",
-        league_key: str | None = None,
-        limit: int = 5000
+        self, sport: str = "football", league_key: str | None = None, limit: int = 5000
     ) -> list[MatchInDB]:
         """Benzerlik analizi icin tamamlanmis maclari getirir.
 
@@ -72,42 +70,29 @@ class MatchRepository:
     async def get_by_external_ids(self, external_ids: list[str]) -> list[dict]:
         """Birden fazla ID'yi tek seferde sorgular (Faz 6 Fix: N+1 engelleme)."""
         cursor = self.collection.find(
-            {"external_id": {"$in": external_ids}},
-            {"external_id": 1, "updated_at": 1}
+            {"external_id": {"$in": external_ids}}, {"external_id": 1, "updated_at": 1}
         )
         return await cursor.to_list(length=len(external_ids))
 
     async def find_matches_by_odds_range(
-        self,
-        home: float,
-        draw: float,
-        away: float,
-        limit: int = 2000
+        self, home: float, draw: float, away: float, limit: int = 2000
     ) -> list[dict]:
         """Oran aralığına göre tamamlanmış maçları getirir (Benzerlik analizi için)."""
         # Basit ve güvenilir $or sorgusu (Atlas uyumlu)
         query = {
-            "status": {"$regex": f"^{MatchStatus.COMPLETED.value}$", "$options": "i"},
-            "$or": [
-                {
-                    "odds.h2h.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
-                    "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
-                    "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
-                },
-                {
-                    "odds.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
-                    "odds.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
-                    "odds.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
-                }
-            ]
+            "status": MatchStatus.COMPLETED.value,
+            "odds.h2h.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
+            "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
+            "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0},
         }
-        
+
         from core.logger import logger
+
         logger.info(f"Benzerlik sorgusu baslatildi: H:{home} D:{draw} A:{away}")
-        
+
         cursor = self.collection.find(query).limit(limit)
         docs = await cursor.to_list(length=limit)
-        
+
         logger.info(f"Sorgu tamamlandi. Bulunan ham mac sayisi: {len(docs)}")
         return docs
 
@@ -115,17 +100,13 @@ class MatchRepository:
         """Toplu mac guncelleme/ekleme (Faz 6 Fix: Mimari uyum)."""
         if not entities:
             return {"upserted": 0, "modified": 0}
-            
+
         operations = [
             UpdateOne(
-                {"external_id": e.external_id},
-                {"$set": e.model_dump()},
-                upsert=True
-            ) for e in entities
+                {"external_id": e.external_id}, {"$set": e.model_dump()}, upsert=True
+            )
+            for e in entities
         ]
-        
+
         result = await self.collection.bulk_write(operations, ordered=False)
-        return {
-            "upserted": result.upserted_count,
-            "modified": result.modified_count
-        }
+        return {"upserted": result.upserted_count, "modified": result.modified_count}

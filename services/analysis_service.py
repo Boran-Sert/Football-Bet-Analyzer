@@ -11,7 +11,6 @@ Yeni yaklasim:
 """
 
 import logging
-import math
 import asyncio
 from pydantic import BaseModel
 
@@ -23,7 +22,7 @@ from utils.cache import cache_response
 
 logger = logging.getLogger(__name__)
 
-DISTANCE_THRESHOLD = 3.0  # Analiz kalitesi için hassasiyeti artırdık (Öneri: 1.5)
+DISTANCE_THRESHOLD = 1.5  # Analiz kalitesi için hassasiyeti artırdık (Öneri: 1.5)
 
 
 class SimilarMatchResult(BaseModel):
@@ -68,13 +67,13 @@ class AnalysisService:
 
         # Tier limit
         tier_limit = TierLimits.get_similar_limit(user_tier.value)
+
         if is_superuser:
-            # Hard cap prevents accidental huge queries (GAP 5 fix)
             final_limit = min(limit_override or 50, TierLimits.superuser_max_limit)
-        elif user_tier in (UserTier.PRO, UserTier.ELITE) and limit_override:
-            final_limit = min(limit_override, tier_limit)
         else:
-            final_limit = tier_limit
+            final_limit = (
+                min(limit_override, tier_limit) if limit_override else tier_limit
+            )
 
         # ── MongoDB aggregation: distance computed in DB ──────────────────────
         results = await self._find_similar_via_aggregation(

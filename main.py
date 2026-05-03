@@ -1,7 +1,6 @@
 """FastAPI uygulama giris noktasi — billing router eklendi (GAP 4)."""
 
 from fastapi import HTTPException
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -21,6 +20,8 @@ from routers.matches import router as matches_router
 from tasks.scheduler import scheduler, configure_scheduler
 from fastapi.exceptions import RequestValidationError
 from prometheus_fastapi_instrumentator import Instrumentator
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from utils.exceptions import (
     AppException,
     app_exception_handler,
@@ -69,8 +70,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
@@ -82,13 +83,7 @@ app.include_router(matches_router)
 app.include_router(analysis_router)
 app.include_router(billing_router)
 
-# Prometheus Metrikleri (Faz 3)
-Instrumentator().instrument(app).expose(
-    app, include_in_schema=False, tags=["Monitoring"]
-)
-
-
-from fastapi.responses import JSONResponse, Response
+Instrumentator().instrument(app)
 
 
 @app.get("/metrics")
@@ -100,8 +95,6 @@ async def metrics_endpoint(request: Request):
     if client_ip not in allowed_ips:
         logger.warning(f"Unauthorized metrics access attempt from {client_ip}")
         raise HTTPException(status_code=403, detail="Forbidden")
-
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 

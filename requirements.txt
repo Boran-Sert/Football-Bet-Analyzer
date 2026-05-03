@@ -18,3 +18,5 @@ pytest-mock
 PyJWT
 stripe
 iyzipay
+prometheus-client
+prometheus-fastapi-instrumentator

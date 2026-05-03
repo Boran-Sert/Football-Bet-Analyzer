@@ -1,4 +1,5 @@
 import { MatchResponse } from "@/types";
+import { useRouter } from "next/navigation";
 
 interface HistoricalAnalysisProps {
   match: MatchResponse;
@@ -17,6 +18,7 @@ export default function HistoricalAnalysis({
   onFetch,
   loading
 }: HistoricalAnalysisProps) {
+  const router = useRouter();
   
   const h2h = match.odds.h2h;
   const totals = match.odds.totals;
@@ -82,11 +84,11 @@ export default function HistoricalAnalysis({
         </div>
 
         <button
-          onClick={onFetch}
+          onClick={userTier ? onFetch : () => router.push("/login")}
           disabled={loading}
           className="px-8 py-3 bg-primary text-black font-black text-xs uppercase tracking-widest rounded-xl hover:scale-105 transition-all disabled:opacity-30 emerald-glow"
         >
-          {loading ? "Hesaplanıyor..." : "Benzerleri Bul →"}
+          {loading ? "Hesaplanıyor..." : userTier ? "Benzerleri Bul →" : "Giriş Yaparak Kullan →"}
         </button>
       </div>
     </div>

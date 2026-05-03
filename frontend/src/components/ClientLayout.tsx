@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import Sidebar from "@/components/Sidebar";
 import TopHeader from "@/components/TopHeader";
 import { API_URL } from "@/config/constants";
@@ -10,6 +10,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const pathname = usePathname();
   const router = useRouter();
   const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const authChecked = useRef(false);
 
   const publicRoutes = ["/login", "/register", "/pricing", "/confirm-email-change", "/billing/success"];
   const isPublicPage = publicRoutes.includes(pathname);
@@ -35,8 +36,10 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       }
     };
     
+    if (authChecked.current) return;
+    authChecked.current = true;
     checkAuth();
-  }, [pathname, isPublicPage, router]);
+  }, [isPublicPage, router]);
 
   if (isAuthChecking && !isPublicPage) {
     return (

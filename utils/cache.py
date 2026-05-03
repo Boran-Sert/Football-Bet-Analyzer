@@ -17,8 +17,6 @@ def _make_serializable(data: Any) -> Any:
         return str(data)  # En kötü ihtimalle string'e çevir ki json.dumps patlamasın
 
 
-
-
 def cache_response(expire: int = 300, key_prefix: str = "cache"):
     """
     Decorator to cache FastAPI endpoint responses in Redis.
@@ -30,18 +28,18 @@ def cache_response(expire: int = 300, key_prefix: str = "cache"):
         async def wrapper(*args, **kwargs):
             # Generate a unique key based on function name, args, and kwargs
             key_parts = [key_prefix, func.__name__]
-            
+
             # Args (skipping 'self' or 'cls' if it's a method)
             # func has __qualname__ which contains class name if it's a method
-            start_idx = 1 if '.' in func.__qualname__ else 0
+            start_idx = 1 if "." in func.__qualname__ else 0
             for arg in args[start_idx:]:
                 key_parts.append(str(arg))
 
             for k, v in sorted(kwargs.items()):
-                if k == "current_user" and hasattr(v, "tier"):
-                    key_parts.append(f"tier:{v.tier}")
-                elif k not in ["auth_service", "current_user", "db", "service"]:
-                    key_parts.append(f"{k}:{v}")
+                if k not in ["auth_service", "current_user", "db", "service"]:
+                    # Enum'ları .value ile stringe çevir
+                    val = v.value if hasattr(v, "value") else str(v)
+                key_parts.append(f"{k}:{val}")
 
             cache_key = ":".join(key_parts)
             redis = redis_manager.get_client()

@@ -7,11 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from core.pricing import PLANS
 from core.database import mongo
 from repositories.user_repository import UserRepository
-from schemas.auth import UserInDB, UserTier
+from schemas.auth import UserInDB
 from services.billing_service import BillingService
 from utils.dependencies import get_current_active_user
 from fastapi.responses import RedirectResponse
 from core.config import settings
+from pydantic import BaseModel
+from services.payment.factory import PaymentProviderFactory
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +21,6 @@ router = APIRouter(prefix="/api/v1/billing", tags=["Billing"])
 
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
-
-from services.payment.factory import PaymentProviderFactory
 
 
 async def get_billing_service() -> BillingService:
@@ -33,8 +33,6 @@ async def get_billing_service() -> BillingService:
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
-
-from pydantic import BaseModel
 
 
 class CheckoutRequest(BaseModel):
