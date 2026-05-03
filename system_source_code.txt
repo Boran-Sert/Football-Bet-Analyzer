@@ -211,9 +211,11 @@ services:
     env_file:
       - .env
     environment:
-      - MONGO_URI=mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/football_saas?authSource=admin
       - REDIS_URL=redis://redis:6379/0
-      - ENVIRONMENT=production
+      - ENVIRONMENT=development
+    volumes:
+      - .:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       mongodb:
         condition: service_healthy # ← MongoDB HAZIR olana kadar bekle
@@ -324,7 +326,7 @@ CMD ["gunicorn", "main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "
 --- DOSYA: main.py ---
 """FastAPI uygulama giris noktasi — billing router eklendi (GAP 4)."""
 
-import logging
+from fastapi import HTTPException
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -344,6 +346,8 @@ from routers.matches import router as matches_router
 from tasks.scheduler import scheduler, configure_scheduler
 from fastapi.exceptions import RequestValidationError
 from prometheus_fastapi_instrumentator import Instrumentator
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from utils.exceptions import (
     AppException,
     app_exception_handler,
@@ -392,8 +396,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
@@ -405,15 +409,7 @@ app.include_router(matches_router)
 app.include_router(analysis_router)
 app.include_router(billing_router)
 
-# Prometheus Metrikleri (Faz 3)
-Instrumentator().instrument(app).expose(
-    app,
-    include_in_schema=False,
-    tags=["Monitoring"]
-)
-
-
-from fastapi.responses import JSONResponse, Response
+Instrumentator().instrument(app)
 
 
 @app.get("/metrics")
@@ -421,12 +417,11 @@ async def metrics_endpoint(request: Request):
     """Custom metrics endpoint with IP whitelist."""
     client_ip = request.client.host if request.client else "unknown"
     allowed_ips = ["127.0.0.1", "::1"] + settings.TRUSTED_PROXIES
-    
+
     if client_ip not in allowed_ips:
         logger.warning(f"Unauthorized metrics access attempt from {client_ip}")
         raise HTTPException(status_code=403, detail="Forbidden")
-        
-    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -602,6 +597,8 @@ pytest-mock
 PyJWT
 stripe
 iyzipay
+prometheus-client
+prometheus-fastapi-instrumentator
 
 --- DOSYA: rules.md ---
 # SAAS BACKEND MİMARİSİ VE KODLAMA STANDARTLARI (KATI KURALLAR)
@@ -3570,7 +3567,7 @@ export default function Register() {
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import Sidebar from "@/components/Sidebar";
 import TopHeader from "@/components/TopHeader";
 import { API_URL } from "@/config/constants";
@@ -3579,6 +3576,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const pathname = usePathname();
   const router = useRouter();
   const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const authChecked = useRef(false);
 
   const publicRoutes = ["/login", "/register", "/pricing", "/confirm-email-change", "/billing/success"];
   const isPublicPage = publicRoutes.includes(pathname);
@@ -3604,8 +3602,10 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
       }
     };
     
+    if (authChecked.current) return;
+    authChecked.current = true;
     checkAuth();
-  }, [pathname, isPublicPage, router]);
+  }, [isPublicPage, router]);
 
   if (isAuthChecking && !isPublicPage) {
     return (
@@ -3707,6 +3707,7 @@ export default function Filters({ onLeagueChange }: FiltersProps) {
 
 --- DOSYA: frontend\src\components\HistoricalAnalysis.tsx ---
 import { MatchResponse } from "@/types";
+import { useRouter } from "next/navigation";
 
 interface HistoricalAnalysisProps {
   match: MatchResponse;
@@ -3725,6 +3726,7 @@ export default function HistoricalAnalysis({
   onFetch,
   loading
 }: HistoricalAnalysisProps) {
+  const router = useRouter();
   
   const h2h = match.odds.h2h;
   const totals = match.odds.totals;
@@ -3790,11 +3792,11 @@ export default function HistoricalAnalysis({
         </div>
 
         <button
-          onClick={onFetch}
+          onClick={userTier ? onFetch : () => router.push("/login")}
           disabled={loading}
           className="px-8 py-3 bg-primary text-black font-black text-xs uppercase tracking-widest rounded-xl hover:scale-105 transition-all disabled:opacity-30 emerald-glow"
         >
-          {loading ? "Hesaplanıyor..." : "Benzerleri Bul →"}
+          {loading ? "Hesaplanıyor..." : userTier ? "Benzerleri Bul →" : "Giriş Yaparak Kullan →"}
         </button>
       </div>
     </div>
@@ -4726,11 +4728,10 @@ Veritabani islemlerini (MongoDB) soyutlar. Sadece burada motor kullanilir.
 """
 
 from typing import Any
-from datetime import datetime
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
-
+from core.logger import logger
 from schemas.match import MatchEntity, MatchInDB, MatchStatus
 
 
@@ -4752,22 +4753,21 @@ class MatchRepository:
         sport: str = "football",
         league_key: str | None = None,
         limit: int = 50,
-        skip: int = 0
+        skip: int = 0,
     ) -> list[MatchInDB]:
         """Yaklasan maclari zamana gore siralayip getirir."""
         query: dict[str, Any] = {"status": MatchStatus.UPCOMING.value, "sport": sport}
         if league_key:
             query["league_key"] = league_key
 
-        cursor = self.collection.find(query).sort("commence_time", 1).skip(skip).limit(limit)
+        cursor = (
+            self.collection.find(query).sort("commence_time", 1).skip(skip).limit(limit)
+        )
         docs = await cursor.to_list(length=limit)
         return [MatchInDB(**doc) for doc in docs]
 
     async def get_completed_matches_for_analysis(
-        self,
-        sport: str = "football",
-        league_key: str | None = None,
-        limit: int = 5000
+        self, sport: str = "football", league_key: str | None = None, limit: int = 5000
     ) -> list[MatchInDB]:
         """Benzerlik analizi icin tamamlanmis maclari getirir.
 
@@ -4794,42 +4794,27 @@ class MatchRepository:
     async def get_by_external_ids(self, external_ids: list[str]) -> list[dict]:
         """Birden fazla ID'yi tek seferde sorgular (Faz 6 Fix: N+1 engelleme)."""
         cursor = self.collection.find(
-            {"external_id": {"$in": external_ids}},
-            {"external_id": 1, "updated_at": 1}
+            {"external_id": {"$in": external_ids}}, {"external_id": 1, "updated_at": 1}
         )
         return await cursor.to_list(length=len(external_ids))
 
     async def find_matches_by_odds_range(
-        self,
-        home: float,
-        draw: float,
-        away: float,
-        limit: int = 2000
+        self, home: float, draw: float, away: float, limit: int = 2000
     ) -> list[dict]:
         """Oran aralığına göre tamamlanmış maçları getirir (Benzerlik analizi için)."""
         # Basit ve güvenilir $or sorgusu (Atlas uyumlu)
         query = {
-            "status": {"$regex": f"^{MatchStatus.COMPLETED.value}$", "$options": "i"},
-            "$or": [
-                {
-                    "odds.h2h.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
-                    "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
-                    "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
-                },
-                {
-                    "odds.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
-                    "odds.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
-                    "odds.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0}
-                }
-            ]
+            "status": MatchStatus.COMPLETED.value,
+            "odds.h2h.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
+            "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
+            "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0},
         }
-        
-        from core.logger import logger
+
         logger.info(f"Benzerlik sorgusu baslatildi: H:{home} D:{draw} A:{away}")
-        
+
         cursor = self.collection.find(query).limit(limit)
         docs = await cursor.to_list(length=limit)
-        
+
         logger.info(f"Sorgu tamamlandi. Bulunan ham mac sayisi: {len(docs)}")
         return docs
 
@@ -4837,20 +4822,16 @@ class MatchRepository:
         """Toplu mac guncelleme/ekleme (Faz 6 Fix: Mimari uyum)."""
         if not entities:
             return {"upserted": 0, "modified": 0}
-            
+
         operations = [
             UpdateOne(
-                {"external_id": e.external_id},
-                {"$set": e.model_dump()},
-                upsert=True
-            ) for e in entities
+                {"external_id": e.external_id}, {"$set": e.model_dump()}, upsert=True
+            )
+            for e in entities
         ]
-        
+
         result = await self.collection.bulk_write(operations, ordered=False)
-        return {
-            "upserted": result.upserted_count,
-            "modified": result.modified_count
-        }
+        return {"upserted": result.upserted_count, "modified": result.modified_count}
 
 
 --- DOSYA: repositories\user_repository.py ---
@@ -5002,7 +4983,8 @@ async def trigger_ingestion(
 --- DOSYA: routers\analysis.py ---
 """Analiz ve benzerlik API yonlendiricisi."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import Query
+from fastapi import APIRouter, Depends, Request
 
 from middleware.rate_limiter import RateLimiter
 from schemas.auth import UserInDB
@@ -5012,25 +4994,22 @@ from utils.dependencies import get_analysis_service, get_current_active_user
 router = APIRouter(prefix="/api/v1/football/analysis", tags=["Football Analysis"])
 
 
-@router.get("/similar/{match_id}", dependencies=[Depends(get_current_active_user), Depends(RateLimiter())])
+@router.get("/similar/{match_id}")
 async def get_similar_matches(
+    request: Request,
     match_id: str,
     limit: int | None = Query(None, ge=1, le=100),
     current_user: UserInDB = Depends(get_current_active_user),
-    service: AnalysisService = Depends(get_analysis_service)
+    service: AnalysisService = Depends(get_analysis_service),
 ):
-    """
-    Yaklasan bir macin oranlarina en benzeyen gecmis maclari bulur.
-    Kullanicinin tier'ina gore (STANDARD, PRO, ELITE) sonuclar sinirlandirilir.
-    """
+    await RateLimiter()(request)
+
     results = await service.find_similar_matches(
         target_match_id=match_id,
         user_tier=current_user.tier,
         is_superuser=current_user.is_superuser,
-        limit_override=limit
+        limit_override=limit,
     )
-    
-    # Sonuclari dondur (Bos olabilir, Frontend bunu handle eder)
     return results
 
 
@@ -5466,9 +5445,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from core.pricing import PLANS
 from core.database import mongo
 from repositories.user_repository import UserRepository
-from schemas.auth import UserInDB, UserTier
+from schemas.auth import UserInDB
 from services.billing_service import BillingService
 from utils.dependencies import get_current_active_user
+from fastapi.responses import RedirectResponse
+from core.config import settings
+from pydantic import BaseModel
+from services.payment.factory import PaymentProviderFactory
 
 logger = logging.getLogger(__name__)
 
@@ -5477,20 +5460,19 @@ router = APIRouter(prefix="/api/v1/billing", tags=["Billing"])
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
-from services.payment.factory import PaymentProviderFactory
 
 async def get_billing_service() -> BillingService:
     db = mongo.get_db()
-    
+
     # Faz 6 Fix: Strategy Pattern Factory kullanimi
     provider = PaymentProviderFactory.get_provider(settings.PAYMENT_PROVIDER)
-        
+
     return BillingService(user_repo=UserRepository(db), provider=provider)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
-from pydantic import BaseModel
+
 class CheckoutRequest(BaseModel):
     plan_id: str  # "pro" veya "elite"
     identity_number: str = "11111111111"  # Default test value
@@ -5505,6 +5487,7 @@ class GuestCheckoutRequest(BaseModel):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
 
 @router.get("/plans")
 async def get_plans():
@@ -5544,12 +5527,17 @@ async def create_checkout_session(
             identity_number=body.identity_number,
             ip=ip,
             registration_date=current_user.created_at,
-            last_login_date=current_user.last_login_at
+            last_login_date=current_user.last_login_at,
         )
         return {"checkout_url": checkout_url}
     except Exception as exc:
-        logger.error("Checkout hatasi [User: %s]: %s", current_user.email, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Ödeme oturumu başlatılamadı. Lütfen daha sonra tekrar deneyiniz.")
+        logger.error(
+            "Checkout hatasi [User: %s]: %s", current_user.email, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Ödeme oturumu başlatılamadı. Lütfen daha sonra tekrar deneyiniz.",
+        )
 
 
 @router.post("/guest-checkout")
@@ -5565,7 +5553,9 @@ async def initialize_guest_checkout(
     # Email kontrolü
     existing = await billing_service.repo.get_by_email(body.email)
     if existing:
-        raise HTTPException(status_code=400, detail="Bu email adresi zaten kullaniliyor.")
+        raise HTTPException(
+            status_code=400, detail="Bu email adresi zaten kullaniliyor."
+        )
 
     try:
         ip = request.client.host if request.client else "127.0.0.1"
@@ -5574,17 +5564,21 @@ async def initialize_guest_checkout(
             "password": body.password,
             "display_name": body.display_name,
             "identity_number": body.identity_number,
-            "ip": ip
+            "ip": ip,
         }
-        checkout_url = await billing_service.initialize_guest_checkout(reg_data, body.plan_id)
+        checkout_url = await billing_service.initialize_guest_checkout(
+            reg_data, body.plan_id
+        )
         return {"checkout_url": checkout_url}
     except Exception as exc:
-        logger.error("Guest Checkout hatasi [Email: %s]: %s", body.email, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail="Ödeme ve kayıt işlemi başlatılamadı. Lütfen bilgilerinizi kontrol edip tekrar deneyiniz.")
+        logger.error(
+            "Guest Checkout hatasi [Email: %s]: %s", body.email, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Ödeme ve kayıt işlemi başlatılamadı. Lütfen bilgilerinizi kontrol edip tekrar deneyiniz.",
+        )
 
-
-from fastapi.responses import RedirectResponse
-from core.config import settings
 
 @router.post("/webhook")
 async def billing_webhook(
@@ -5601,43 +5595,50 @@ async def billing_webhook(
         payload = dict(payload)
 
     headers = request.headers
-    
+
     # Idempotency Kontrolü (Faz 5 Fix: Provider-Specific Unique ID + Atomic SET NX)
     # Iyzico 'token' veya 'paymentId' gönderir. Stripe 'id' (event id) gönderir.
     unique_id = (
-        payload.get("token") or 
-        payload.get("paymentId") or 
-        payload.get("id") or 
-        headers.get("X-Idempotency-Key")
+        payload.get("token")
+        or payload.get("paymentId")
+        or payload.get("id")
+        or headers.get("X-Idempotency-Key")
     )
-    
+
     if unique_id:
         from core.redis_client import redis_manager
+
         redis = redis_manager.get_client()
         lock_key = f"idempotency:billing:{unique_id}"
-        
+
         # Atomic SET NX: Sadece anahtar yoksa yaz ve True dön. (Race condition engellenir)
-        is_new = await redis.set(lock_key, "processing", ex=300, nx=True) # Başlangıçta 5 dk kilit
+        is_new = await redis.set(
+            lock_key, "processing", ex=300, nx=True
+        )  # Başlangıçta 5 dk kilit
         if not is_new:
             current_status = await redis.get(lock_key)
             if current_status == "processing":
                 logger.warning("Webhook hala isleniyor (409): %s", unique_id)
-                raise HTTPException(status_code=409, detail="Payment is currently being processed. Please try again later.")
-            
-            logger.info("Mükerrer webhook isteği engellendi (Already processed): %s", unique_id)
+                raise HTTPException(
+                    status_code=409,
+                    detail="Payment is currently being processed. Please try again later.",
+                )
+
+            logger.info(
+                "Mükerrer webhook isteği engellendi (Already processed): %s", unique_id
+            )
             return {"status": "already_processed"}
 
     try:
         success = await billing_service.handle_webhook(payload, headers)
-        
+
         if success:
             if unique_id:
                 # İşlem başarılıysa kilidi 24 saate uzat (artık 'processed')
                 await redis.setex(lock_key, 86400, "processed")
-            
+
             return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/login?payment=success", 
-                status_code=303
+                url=f"{settings.FRONTEND_URL}/login?payment=success", status_code=303
             )
         else:
             # İşlem başarısızsa kilidi kaldır (retry için)
@@ -5648,11 +5649,10 @@ async def billing_webhook(
         if unique_id:
             await redis.delete(lock_key)
         raise HTTPException(status_code=500, detail="Webhook processing failed")
-    
+
     # Başarısızsa planlar sayfasina hata ile don
     return RedirectResponse(
-        url=f"{settings.FRONTEND_URL}/pricing?error=payment_failed", 
-        status_code=303
+        url=f"{settings.FRONTEND_URL}/pricing?error=payment_failed", status_code=303
     )
 
 
@@ -6107,7 +6107,6 @@ Yeni yaklasim:
 """
 
 import logging
-import math
 import asyncio
 from pydantic import BaseModel
 
@@ -6164,13 +6163,13 @@ class AnalysisService:
 
         # Tier limit
         tier_limit = TierLimits.get_similar_limit(user_tier.value)
+
         if is_superuser:
-            # Hard cap prevents accidental huge queries (GAP 5 fix)
             final_limit = min(limit_override or 50, TierLimits.superuser_max_limit)
-        elif user_tier in (UserTier.PRO, UserTier.ELITE) and limit_override:
-            final_limit = min(limit_override, tier_limit)
         else:
-            final_limit = tier_limit
+            final_limit = (
+                min(limit_override, tier_limit) if limit_override else tier_limit
+            )
 
         # ── MongoDB aggregation: distance computed in DB ──────────────────────
         results = await self._find_similar_via_aggregation(
@@ -6205,7 +6204,7 @@ class AnalysisService:
         limit: int,
     ) -> list[SimilarMatchResult]:
         """Repository üzerinden filtrelenmiş veriyi çeker, mesafeyi Python'da hesaplar."""
-        
+
         # Rule 12 Fix: Raw DB erişimi yerine repository metodu kullanıldı
         docs = await self.repo.find_matches_by_odds_range(
             home=home, draw=draw, away=away, limit=2000
@@ -6218,7 +6217,7 @@ class AnalysisService:
                     # Robust odds retrieval: both nested (h2h) and flat structures
                     odds_data = doc.get("odds", {})
                     h2h = odds_data.get("h2h", {})
-                    
+
                     h = h2h.get("home") or odds_data.get("home")
                     d = h2h.get("draw") or odds_data.get("draw")
                     a = h2h.get("away") or odds_data.get("away")
@@ -6227,8 +6226,12 @@ class AnalysisService:
                         continue
 
                     # Oklid mesafesi (Euclidean Distance)
-                    dist = ((float(h) - home)**2 + (float(d) - draw)**2 + (float(a) - away)**2)**0.5
-                    
+                    dist = (
+                        (float(h) - home) ** 2
+                        + (float(d) - draw) ** 2
+                        + (float(a) - away) ** 2
+                    ) ** 0.5
+
                     if dist < DISTANCE_THRESHOLD:
                         sim_pct = max(0.0, 100.0 - (dist * 33.3))
                         results_local.append(
@@ -6239,9 +6242,11 @@ class AnalysisService:
                             )
                         )
                 except Exception as e:
-                    logger.error(f"Mac dokumani dogrulama hatasi: {str(e)} | Match ID: {doc.get('external_id')}")
+                    logger.error(
+                        f"Mac dokumani dogrulama hatasi: {str(e)} | Match ID: {doc.get('external_id')}"
+                    )
                     continue
-            
+
             # Python tarafında sıralama (MongoDB In-memory sort limit sorunu yok)
             results_local.sort(key=lambda x: x.distance)
             return results_local[:limit]
@@ -7978,8 +7983,6 @@ def _make_serializable(data: Any) -> Any:
         return str(data)  # En kötü ihtimalle string'e çevir ki json.dumps patlamasın
 
 
-
-
 def cache_response(expire: int = 300, key_prefix: str = "cache"):
     """
     Decorator to cache FastAPI endpoint responses in Redis.
@@ -7991,18 +7994,18 @@ def cache_response(expire: int = 300, key_prefix: str = "cache"):
         async def wrapper(*args, **kwargs):
             # Generate a unique key based on function name, args, and kwargs
             key_parts = [key_prefix, func.__name__]
-            
+
             # Args (skipping 'self' or 'cls' if it's a method)
             # func has __qualname__ which contains class name if it's a method
-            start_idx = 1 if '.' in func.__qualname__ else 0
+            start_idx = 1 if "." in func.__qualname__ else 0
             for arg in args[start_idx:]:
                 key_parts.append(str(arg))
 
             for k, v in sorted(kwargs.items()):
-                if k == "current_user" and hasattr(v, "tier"):
-                    key_parts.append(f"tier:{v.tier}")
-                elif k not in ["auth_service", "current_user", "db", "service"]:
-                    key_parts.append(f"{k}:{v}")
+                if k not in ["auth_service", "current_user", "db", "service"]:
+                    # Enum'ları .value ile stringe çevir
+                    val = v.value if hasattr(v, "value") else str(v)
+                key_parts.append(f"{k}:{val}")
 
             cache_key = ":".join(key_parts)
             redis = redis_manager.get_client()

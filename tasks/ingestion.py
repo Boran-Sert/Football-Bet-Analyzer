@@ -56,6 +56,9 @@ async def fetch_upcoming_matches() -> None:
         db = mongo.get_db()
         repo = MatchRepository(db)
 
+        # Eski maclari temizle (Suresi dolmus UPCOMING maclar)
+        await repo.delete_expired_upcoming_matches()
+
         total_new = 0
         total_skipped = 0
 

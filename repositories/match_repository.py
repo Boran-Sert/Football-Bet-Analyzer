@@ -4,6 +4,7 @@ Veritabani islemlerini (MongoDB) soyutlar. Sadece burada motor kullanilir.
 """
 
 from typing import Any
+from datetime import datetime, timezone
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
@@ -28,13 +29,33 @@ class MatchRepository:
         self,
         sport: str = "football",
         league_key: str | None = None,
+        start_hour: int | None = None,
+        end_hour: int | None = None,
         limit: int = 50,
         skip: int = 0,
     ) -> list[MatchInDB]:
-        """Yaklasan maclari zamana gore siralayip getirir."""
-        query: dict[str, Any] = {"status": MatchStatus.UPCOMING.value, "sport": sport}
+        """Yaklasan maclari zamana ve saate gore siralayip getirir."""
+        now = datetime.now(timezone.utc)
+        query: dict[str, Any] = {
+            "status": MatchStatus.UPCOMING.value, 
+            "sport": sport,
+            "commence_time": {"$gte": now}
+        }
         if league_key:
             query["league_key"] = league_key
+
+        # Saat bazlı filtreleme (Local saat üzerinden: UTC+3)
+        if start_hour is not None and end_hour is not None:
+            # MongoDB veriyi UTC tutar. +3 saat (3 * 3600 * 1000 ms) ekleyip saati kontrol ediyoruz.
+            utc_offset_ms = 3 * 3600 * 1000
+            
+            # 24:00 durumunu handle etmek için (20-24 aralığı gibi)
+            query["$expr"] = {
+                "$and": [
+                    {"$gte": [{"$hour": {"$add": ["$commence_time", utc_offset_ms]}}, start_hour]},
+                    {"$lt": [{"$hour": {"$add": ["$commence_time", utc_offset_ms]}}, end_hour]}
+                ]
+            }
 
         cursor = (
             self.collection.find(query).sort("commence_time", 1).skip(skip).limit(limit)
@@ -74,24 +95,64 @@ class MatchRepository:
         )
         return await cursor.to_list(length=len(external_ids))
 
-    async def find_matches_by_odds_range(
-        self, home: float, draw: float, away: float, limit: int = 2000
+    async def find_similar_matches_by_distance(
+        self,
+        home: float,
+        draw: float,
+        away: float,
+        threshold: float = 1.5,
+        limit: int = 50,
     ) -> list[dict]:
-        """Oran aralığına göre tamamlanmış maçları getirir (Benzerlik analizi için)."""
-        # Basit ve güvenilir $or sorgusu (Atlas uyumlu)
-        query = {
-            "status": MatchStatus.COMPLETED.value,
-            "odds.h2h.home": {"$gte": float(home) - 1.0, "$lte": float(home) + 1.0},
-            "odds.h2h.draw": {"$gte": float(draw) - 1.0, "$lte": float(draw) + 1.0},
-            "odds.h2h.away": {"$gte": float(away) - 1.0, "$lte": float(away) + 1.0},
-        }
+        """Oranlara göre Euclidean Distance hesabını %100 MongoDB içinde yapar."""
 
-        logger.info(f"Benzerlik sorgusu baslatildi: H:{home} D:{draw} A:{away}")
+        logger.info(f"Aggregation Pipeline baslatildi: H:{home} D:{draw} A:{away}")
 
-        cursor = self.collection.find(query).limit(limit)
+        pipeline = [
+            {
+                "$match": {
+                    "status": MatchStatus.COMPLETED.value,
+                    "odds.h2h.home": {"$type": "number"},
+                    "odds.h2h.draw": {"$type": "number"},
+                    "odds.h2h.away": {"$type": "number"},
+                }
+            },
+            {
+                "$addFields": {
+                    "distance": {
+                        "$sqrt": {
+                            "$add": [
+                                {
+                                    "$pow": [
+                                        {"$subtract": ["$odds.h2h.home", float(home)]},
+                                        2,
+                                    ]
+                                },
+                                {
+                                    "$pow": [
+                                        {"$subtract": ["$odds.h2h.draw", float(draw)]},
+                                        2,
+                                    ]
+                                },
+                                {
+                                    "$pow": [
+                                        {"$subtract": ["$odds.h2h.away", float(away)]},
+                                        2,
+                                    ]
+                                },
+                            ]
+                        }
+                    }
+                }
+            },
+            {"$match": {"distance": {"$lte": threshold}}},
+            {"$sort": {"distance": 1}},
+            {"$limit": limit},
+        ]
+
+        cursor = self.collection.aggregate(pipeline)
         docs = await cursor.to_list(length=limit)
 
-        logger.info(f"Sorgu tamamlandi. Bulunan ham mac sayisi: {len(docs)}")
+        logger.info(f"Aggregation tamamlandi. Bulunan eslesme: {len(docs)}")
         return docs
 
     async def bulk_upsert(self, entities: list[MatchEntity]) -> dict:
@@ -108,3 +169,14 @@ class MatchRepository:
 
         result = await self.collection.bulk_write(operations, ordered=False)
         return {"upserted": result.upserted_count, "modified": result.modified_count}
+
+    async def delete_expired_upcoming_matches(self) -> int:
+        """Baslama saati gecmis ama hala UPCOMING olan maclari temizler."""
+        now = datetime.now(timezone.utc)
+        result = await self.collection.delete_many({
+            "status": MatchStatus.UPCOMING.value,
+            "commence_time": {"$lt": now}
+        })
+        if result.deleted_count > 0:
+            logger.info(f"Temizlik: {result.deleted_count} adet suresi dolmus mac silindi.")
+        return result.deleted_count

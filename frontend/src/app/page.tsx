@@ -19,7 +19,10 @@ export default function Home() {
   const [limit, setLimit] = useState(10);
   const [similarMatches, setSimilarMatches] = useState<SimilarMatchResult[]>([]);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
-  const [userTier, setUserTier] = useState<string>("standard"); // Default to standard
+  const [userTier, setUserTier] = useState<string>("standard"); 
+  const [isSuperuser, setIsSuperuser] = useState<boolean>(false);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [selectedTimeRange, setSelectedTimeRange] = useState<string>("all");
 
   // Fetch upcoming matches
   useEffect(() => {
@@ -31,9 +34,18 @@ export default function Home() {
       }
       
       try {
-        const url = selectedLeague
-          ? `${API_URL}/api/v1/football/matches/?league=${selectedLeague}`
-          : `${API_URL}/api/v1/football/matches/`;
+        let url = `${API_URL}/api/v1/football/matches/?`;
+        const params = new URLSearchParams();
+        
+        if (selectedLeague) params.append("league", selectedLeague);
+        
+        if (selectedTimeRange !== "all") {
+          const [start, end] = selectedTimeRange.split("-");
+          params.append("start_hour", start);
+          params.append("end_hour", end === "00" ? "24" : end);
+        }
+        
+        url += params.toString();
 
         const response = await fetch(url);
         if (!response.ok) throw new Error("Backend unreachable");
@@ -70,7 +82,7 @@ export default function Home() {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [selectedLeague]);
+  }, [selectedLeague, selectedTimeRange]);
 
   // Fetch User Tier
   useEffect(() => {
@@ -82,6 +94,7 @@ export default function Home() {
         if (res.ok) {
           const data = await res.json();
           setUserTier(data.tier);
+          setIsSuperuser(data.is_superuser || false);
           if (data.tier === "elite") setLimit(20);
           if (data.tier === "pro") setLimit(10);
           if (data.tier === "standard") setLimit(3);
@@ -142,6 +155,27 @@ export default function Home() {
       setSimilarMatches([]);
     } finally {
       setLoadingAnalysis(false);
+    }
+  };
+
+  const handleTriggerSync = async () => {
+    if (!window.confirm("Maç verilerini manuel olarak güncellemek istiyor musunuz? Bu işlem arka planda çalışacaktır.")) return;
+    
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`${API_URL}/api/v1/admin/system/trigger-ingestion`, {
+        method: "POST",
+        credentials: "include"
+      });
+      if (res.ok) {
+        alert("GÖREV BAŞLATILDI: Maç verileri birkaç dakika içinde güncellenmiş olacaktır.");
+      } else {
+        alert("HATA: Admin yetkiniz olmayabilir veya sistem meşgul.");
+      }
+    } catch (err) {
+      alert("Bağlantı hatası oluştu.");
+    } finally {
+      setIsSyncing(false);
     }
   };
 
@@ -209,13 +243,28 @@ export default function Home() {
         {/* LEFT: MATCHES TABLE */}
         <div className="xl:col-span-3 flex flex-col gap-6">
           <div className="flex items-center justify-between px-2">
-            <h2 className="text-lg font-bold text-white flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
-              Yaklaşan Maçlar
+            <h2 className="text-lg font-bold text-white flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                Yaklaşan Maçlar
+              </div>
+              
+              {isSuperuser && (
+                <button 
+                  onClick={handleTriggerSync}
+                  disabled={isSyncing}
+                  className="px-4 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-500 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-500 hover:text-black transition-all disabled:opacity-30"
+                >
+                  {isSyncing ? "BAŞLATILIYOR..." : "Verileri Manuel Güncelle"}
+                </button>
+              )}
             </h2>
             <div className="flex items-center gap-4">
-              <div className="w-48">
-                <Filters onLeagueChange={setSelectedLeague} />
+              <div className="w-full md:w-auto min-w-[400px]">
+                <Filters 
+                  onLeagueChange={setSelectedLeague} 
+                  onTimeRangeChange={setSelectedTimeRange}
+                />
               </div>
             </div>
           </div>

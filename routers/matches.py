@@ -15,6 +15,8 @@ router = APIRouter(prefix="/api/v1/football/matches", tags=["Football Matches"])
 @router.get("/", response_model=MatchListResponse, dependencies=[Depends(RateLimiter())])
 async def get_upcoming_matches(
     league: str | None = Query(None, description="Lig koduna gore filtrele (orn: soccer_epl)"),
+    start_hour: int | None = Query(None, ge=0, le=23, description="Baslangic saati (Local)"),
+    end_hour: int | None = Query(None, ge=0, le=24, description="Bitis saati (Local)"),
     page: int = Query(1, ge=1, description="Sayfa numarasi"),
     per_page: int = Query(20, ge=1, le=100, description="Sayfa basina mac sayisi"),
     service: MatchService = Depends(get_match_service)
@@ -25,6 +27,8 @@ async def get_upcoming_matches(
     matches = await service.get_upcoming_matches(
         sport="football",
         league_key=league,
+        start_hour=start_hour,
+        end_hour=end_hour,
         limit=per_page,
         skip=skip
     )

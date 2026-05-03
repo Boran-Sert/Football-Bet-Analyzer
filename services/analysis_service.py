@@ -11,7 +11,6 @@ Yeni yaklasim:
 """
 
 import logging
-import asyncio
 from pydantic import BaseModel
 
 from core.config import TierLimits
@@ -107,53 +106,32 @@ class AnalysisService:
         away: float,
         limit: int,
     ) -> list[SimilarMatchResult]:
-        """Repository üzerinden filtrelenmiş veriyi çeker, mesafeyi Python'da hesaplar."""
+        """Repository üzerinden hesaplanmış ve sıralanmış veriyi çeker."""
 
-        # Rule 12 Fix: Raw DB erişimi yerine repository metodu kullanıldı
-        docs = await self.repo.find_matches_by_odds_range(
-            home=home, draw=draw, away=away, limit=2000
+        # 1. DB'den hazır hesaplanmış veriyi çek (Ağır işi DB yaptı)
+        docs = await self.repo.find_similar_matches_by_distance(
+            home=home, draw=draw, away=away, threshold=DISTANCE_THRESHOLD, limit=limit
         )
 
-        def process_docs(docs_list):
-            results_local = []
-            for doc in docs_list:
-                try:
-                    # Robust odds retrieval: both nested (h2h) and flat structures
-                    odds_data = doc.get("odds", {})
-                    h2h = odds_data.get("h2h", {})
+        results = []
+        # 2. Sadece gelen veriyi Pydantic modeline dönüştür (Artık ağır matematik veya to_thread yok)
+        for doc in docs:
+            try:
+                # MongoDB aggregation 'distance' alanını hesaplayıp içine koydu
+                dist = doc.get("distance", 0.0)
+                sim_pct = max(0.0, 100.0 - (dist * 33.3))
 
-                    h = h2h.get("home") or odds_data.get("home")
-                    d = h2h.get("draw") or odds_data.get("draw")
-                    a = h2h.get("away") or odds_data.get("away")
-
-                    if h is None or d is None or a is None:
-                        continue
-
-                    # Oklid mesafesi (Euclidean Distance)
-                    dist = (
-                        (float(h) - home) ** 2
-                        + (float(d) - draw) ** 2
-                        + (float(a) - away) ** 2
-                    ) ** 0.5
-
-                    if dist < DISTANCE_THRESHOLD:
-                        sim_pct = max(0.0, 100.0 - (dist * 33.3))
-                        results_local.append(
-                            SimilarMatchResult(
-                                match=MatchInDB(**doc),
-                                distance=round(dist, 4),
-                                similarity_percentage=round(sim_pct, 1),
-                            )
-                        )
-                except Exception as e:
-                    logger.error(
-                        f"Mac dokumani dogrulama hatasi: {str(e)} | Match ID: {doc.get('external_id')}"
+                results.append(
+                    SimilarMatchResult(
+                        match=MatchInDB(**doc),
+                        distance=round(dist, 4),
+                        similarity_percentage=round(sim_pct, 1),
                     )
-                    continue
+                )
+            except Exception as e:
+                logger.error(
+                    f"Mac dokumani dogrulama hatasi: {str(e)} | Match ID: {doc.get('external_id')}"
+                )
+                continue
 
-            # Python tarafında sıralama (MongoDB In-memory sort limit sorunu yok)
-            results_local.sort(key=lambda x: x.distance)
-            return results_local[:limit]
-
-        # Agır CPU islemi (2000 objenin traverse edilmesi) oldugu icin thread'e aliyoruz
-        return await asyncio.to_thread(process_docs, docs)
+        return results

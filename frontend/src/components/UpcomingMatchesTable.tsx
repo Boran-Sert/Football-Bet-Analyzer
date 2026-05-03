@@ -47,7 +47,7 @@ export default function UpcomingMatchesTable({ matches, selectedMatchId, onSelec
               <tr 
                 key={match.external_id} 
                 onClick={() => onSelectMatch(match)}
-                className={`cursor-pointer transition-all duration-300 hover:bg-white/[0.04] ${isSelected ? 'bg-primary/10 border-l-2 border-primary' : ''}`}
+                className={`cursor-pointer transition-all duration-300 hover:bg-white/[0.04] relative ${isSelected ? 'bg-primary/20 ring-1 ring-primary z-10 shadow-[0_0_15px_rgba(16,185,129,0.3)]' : ''}`}
               >
                 <td className="px-6 py-4 text-center">
                   <div className={`w-4 h-4 rounded-full border-2 transition-all ${isSelected ? 'bg-primary border-primary emerald-glow' : 'border-white/20'}`}></div>

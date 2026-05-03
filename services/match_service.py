@@ -16,11 +16,20 @@ class MatchService:
         self,
         sport: str = "football",
         league_key: str | None = None,
+        start_hour: int | None = None,
+        end_hour: int | None = None,
         limit: int = 50,
         skip: int = 0
     ) -> list[MatchInDB]:
         """Yaklasan maclari getirir (5 dakika cache)."""
-        return await self.repo.get_upcoming_matches(sport, league_key, limit, skip)
+        return await self.repo.get_upcoming_matches(
+            sport=sport, 
+            league_key=league_key, 
+            start_hour=start_hour, 
+            end_hour=end_hour, 
+            limit=limit, 
+            skip=skip
+        )
 
     @cache_response(expire=3600, key_prefix="matches:leagues")
     async def get_available_leagues(self, sport: str = "football") -> list[str]:
