@@ -14,8 +14,8 @@ class EmailClient:
     def __init__(self):
         self.api_key = settings.RESEND_API_KEY
         self.base_url = "https://api.resend.com/emails"
-        # Replace with your verified Resend sender domain
-        self.from_address = "Football SaaS <noreply@yourdomain.com>"
+        # S-21 Fix: Hardcoded adres kaldırıldı, settings'den okunuyor
+        self.from_address = settings.EMAIL_FROM_ADDRESS
 
     async def _send(self, to_email: str, subject: str, html: str) -> bool:
         """Internal shared send method."""

@@ -26,8 +26,16 @@ def mock_provider():
 
 
 @pytest.fixture
-def billing_service(mock_user_repo, mock_provider):
-    return BillingService(user_repo=mock_user_repo, provider=mock_provider)
+def mock_redis():
+    redis = AsyncMock()
+    redis.setex.return_value = True
+    return redis
+
+
+@pytest.fixture
+def billing_service(mock_user_repo, mock_provider, mock_redis):
+    with patch("core.redis_client.redis_manager.get_client", return_value=mock_redis):
+        return BillingService(user_repo=mock_user_repo, provider=mock_provider)
 
 
 class TestBillingService:
@@ -36,7 +44,7 @@ class TestBillingService:
         self, billing_service, mock_provider
     ):
         url = await billing_service.create_checkout_session(
-            "user123", "test@example.com", "pro"
+            user_id="user123", user_email="test@example.com", plan_id="pro"
         )
         assert url == "https://iyzico.com/pay"
         mock_provider.create_checkout_session.assert_called_once_with(

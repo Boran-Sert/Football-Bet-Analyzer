@@ -53,7 +53,7 @@ class TestAccessToken:
         assert data.is_superuser is True
 
     def test_tampered_token_returns_none(self, auth_service):
-        token = auth_service.create_access_token("user123", UserTier.FREE)
+        token = auth_service.create_access_token("user123", UserTier.STANDARD)
         assert auth_service.decode_token(token + "x") is None
 
     def test_empty_string_returns_none(self, auth_service):
@@ -124,7 +124,7 @@ class TestRegister:
             )
         )
         created_user: UserInDB = mock_user_repo.create.call_args[0][0]
-        assert created_user.tier == UserTier.FREE
+        assert created_user.tier == UserTier.STANDARD
         assert created_user.is_superuser is False
         assert created_user.is_verified is False
 

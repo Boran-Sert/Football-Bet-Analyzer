@@ -5,9 +5,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, HTTPException
 
 from middleware.rate_limiter import RateLimiter
+from schemas.auth import UserInDB
 from schemas.match import MatchResponse, MatchListResponse
 from services.match_service import MatchService
-from utils.dependencies import get_match_service
+from utils.dependencies import get_match_service, get_current_active_user
 
 router = APIRouter(prefix="/api/v1/football/matches", tags=["Football Matches"])
 
@@ -19,9 +20,10 @@ async def get_upcoming_matches(
     end_hour: int | None = Query(None, ge=0, le=24, description="Bitis saati (Local)"),
     page: int = Query(1, ge=1, description="Sayfa numarasi"),
     per_page: int = Query(20, ge=1, le=100, description="Sayfa basina mac sayisi"),
+    current_user: UserInDB = Depends(get_current_active_user),
     service: MatchService = Depends(get_match_service)
 ):
-    """Yaklasan futbol maclarini listeler (Onbellekli)."""
+    """Yaklasan futbol maclarini listeler (Onbellekli). Auth gerektirir."""
     skip = (page - 1) * per_page
     
     matches = await service.get_upcoming_matches(
@@ -33,9 +35,8 @@ async def get_upcoming_matches(
         skip=skip
     )
     
-    # Gercek total sayisini almak icin count sorgusu yapilabilir, 
-    # simdilik list uzunluguna gore tahmin yurutebilir veya ayri bir count sorgusu cagirabiliriz.
-    total = await service.repo.count_matches({"status": "upcoming", "sport": "football"} | ({"league_key": league} if league else {}))
+    # S-04 Fix: Router artik Repository'ye dogrudan erismez, Service katmanini kullanir.
+    total = await service.count_upcoming_matches(sport="football", league_key=league)
 
     return {
         "data": matches,
@@ -46,17 +47,21 @@ async def get_upcoming_matches(
 
 
 @router.get("/leagues", response_model=list[str], dependencies=[Depends(RateLimiter())])
-async def get_leagues(service: MatchService = Depends(get_match_service)):
-    """Sistemde aktif verisi bulunan ligleri listeler."""
+async def get_leagues(
+    current_user: UserInDB = Depends(get_current_active_user),
+    service: MatchService = Depends(get_match_service)
+):
+    """Sistemde aktif verisi bulunan ligleri listeler. Auth gerektirir."""
     return await service.get_available_leagues(sport="football")
 
 
 @router.get("/{match_id}", response_model=MatchResponse, dependencies=[Depends(RateLimiter())])
 async def get_match_detail(
     match_id: str,
+    current_user: UserInDB = Depends(get_current_active_user),
     service: MatchService = Depends(get_match_service)
 ):
-    """Tekil mac detayini getirir."""
+    """Tekil mac detayini getirir. Auth gerektirir."""
     match = await service.get_match_by_id(match_id)
     if not match:
         raise HTTPException(status_code=404, detail="Mac bulunamadi")

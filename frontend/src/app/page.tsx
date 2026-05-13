@@ -7,9 +7,11 @@ import UpcomingMatchesTable from "@/components/UpcomingMatchesTable";
 import HistoricalAnalysis from "@/components/HistoricalAnalysis";
 import SimilarMatchesTable from "@/components/SimilarMatchesTable";
 import SummaryStats from "@/components/SummaryStats";
+import { useToast } from "@/components/Toast";
 import { API_URL } from "@/config/constants";
 
 export default function Home() {
+  const { showToast } = useToast();
   const [matches, setMatches] = useState<MatchResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedLeague, setSelectedLeague] = useState("");
@@ -151,7 +153,7 @@ export default function Home() {
       }
     } catch (err: any) {
       console.error("Analiz Hatası:", err);
-      alert(err.message || "Analiz hatası");
+      showToast(err.message || "Analiz sırasında bir hata oluştu.", "error");
       setSimilarMatches([]);
     } finally {
       setLoadingAnalysis(false);
@@ -159,8 +161,6 @@ export default function Home() {
   };
 
   const handleTriggerSync = async () => {
-    if (!window.confirm("Maç verilerini manuel olarak güncellemek istiyor musunuz? Bu işlem arka planda çalışacaktır.")) return;
-    
     setIsSyncing(true);
     try {
       const res = await fetch(`${API_URL}/api/v1/admin/system/trigger-ingestion`, {
@@ -168,12 +168,12 @@ export default function Home() {
         credentials: "include"
       });
       if (res.ok) {
-        alert("GÖREV BAŞLATILDI: Maç verileri birkaç dakika içinde güncellenmiş olacaktır.");
+        showToast("Maç verileri birkaç dakika içinde güncellenmiş olacaktır.", "success");
       } else {
-        alert("HATA: Admin yetkiniz olmayabilir veya sistem meşgul.");
+        showToast("Admin yetkiniz olmayabilir veya sistem meşgul.", "error");
       }
     } catch (err) {
-      alert("Bağlantı hatası oluştu.");
+      showToast("Sunucuya bağlanılamadı. Lütfen tekrar deneyin.", "error");
     } finally {
       setIsSyncing(false);
     }

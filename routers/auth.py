@@ -11,7 +11,7 @@ Endpoints:
   GET  /api/v1/auth/me              — Profil bilgisi
 """
 
-import hashlib
+
 from typing import Optional
 from fastapi import (
     APIRouter,
@@ -180,27 +180,14 @@ async def refresh_access_token(
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Refresh token bulunamadi.")
 
-    # Distributed Lock (Faz 6 Fix: Race Condition / Token Cloning)
-    from core.redis_client import redis_manager
-
-    redis = redis_manager.get_client()
-    lock_key = f"lock:refresh:{hashlib.md5(refresh_token.encode()).hexdigest()}"
-
-    async with redis.lock(lock_key, timeout=10):
-        token_data = await auth_service.verify_refresh_token(refresh_token)
-        if not token_data:
-            raise HTTPException(
-                status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
-            )
-
-        # Rotate: revoke old, issue new pair
-        await auth_service.revoke_refresh_token(refresh_token)
-        new_access = auth_service.create_access_token(
-            token_data.user_id, token_data.tier, token_data.is_superuser
+    # S-09 Fix: Token rotation logic'i service katmanina tasindi
+    result = await auth_service.rotate_refresh_token(refresh_token)
+    if not result:
+        raise HTTPException(
+            status_code=401, detail="Gecersiz veya suresi dolmus refresh token."
         )
-        new_refresh = await auth_service.create_refresh_token(
-            token_data.user_id, token_data.tier, token_data.is_superuser
-        )
+
+    new_access, new_refresh = result
 
     # Cookie tabanli auth (Faz 1)
     is_prod = settings.ENVIRONMENT == "production"

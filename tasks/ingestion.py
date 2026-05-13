@@ -172,16 +172,30 @@ async def _upsert_to_db(repo: MatchRepository, entities: list) -> None:
 
 
 async def _invalidate_cache(sport_name: str) -> None:
-    """Ilgili Redis cache anahtarlarini siler."""
+    """Ilgili Redis cache anahtarlarini siler.
+
+    S-12 Fix: Pattern'lar cache_response decorator'undeki key_prefix'lerle eslestirildi.
+    Onceki pattern 'matches:football:*' hicbir key'i bulamiyordu.
+    """
     try:
         redis = redis_manager.get_client()
-        pattern = f"matches:{sport_name}:*"
-        keys = []
-        async for key in redis.scan_iter(match=pattern):
-            keys.append(key)
-        if keys:
-            await redis.delete(*keys)
-            logger.info("Redis cache temizlendi: %d anahtar silindi.", len(keys))
+        # cache_response decorator'undeki gercek key_prefix'ler:
+        #   matches:upcoming:*, matches:leagues:*, analysis:similar:*
+        patterns = [
+            "matches:upcoming:*",
+            "matches:leagues:*",
+            "analysis:similar:*",
+        ]
+        total_deleted = 0
+        for pattern in patterns:
+            keys = []
+            async for key in redis.scan_iter(match=pattern):
+                keys.append(key)
+            if keys:
+                await redis.delete(*keys)
+                total_deleted += len(keys)
+        if total_deleted:
+            logger.info("Redis cache temizlendi: %d anahtar silindi.", total_deleted)
     except Exception as exc:
         logger.warning("Redis cache temizleme hatasi: %s", exc)
 

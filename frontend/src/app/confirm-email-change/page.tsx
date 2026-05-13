@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { API_URL } from "@/config/constants";
 
-export default function ConfirmEmailChangePage() {
+function ConfirmEmailChangeContent() {
   const searchParams = useSearchParams();
   const token = searchParams.get("token");
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
@@ -88,5 +88,17 @@ export default function ConfirmEmailChangePage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function ConfirmEmailChangePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-[80vh] flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-primary"></div>
+      </div>
+    }>
+      <ConfirmEmailChangeContent />
+    </Suspense>
   );
 }

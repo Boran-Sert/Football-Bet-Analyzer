@@ -5,47 +5,16 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.pricing import PLANS
-from core.database import mongo
-from repositories.user_repository import UserRepository
 from schemas.auth import UserInDB
+from schemas.billing import CheckoutRequest, GuestCheckoutRequest
 from services.billing_service import BillingService
-from utils.dependencies import get_current_active_user
+from utils.dependencies import get_current_active_user, get_billing_service
 from fastapi.responses import RedirectResponse
 from core.config import settings
-from pydantic import BaseModel
-from services.payment.factory import PaymentProviderFactory
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/billing", tags=["Billing"])
-
-
-# ── Dependencies ──────────────────────────────────────────────────────────────
-
-
-async def get_billing_service() -> BillingService:
-    db = mongo.get_db()
-
-    # Faz 6 Fix: Strategy Pattern Factory kullanimi
-    provider = PaymentProviderFactory.get_provider(settings.PAYMENT_PROVIDER)
-
-    return BillingService(user_repo=UserRepository(db), provider=provider)
-
-
-# ── Schemas ───────────────────────────────────────────────────────────────────
-
-
-class CheckoutRequest(BaseModel):
-    plan_id: str  # "pro" veya "elite"
-    identity_number: str = "11111111111"  # Default test value
-
-
-class GuestCheckoutRequest(BaseModel):
-    plan_id: str
-    email: str
-    password: str
-    display_name: str
-    identity_number: str = "11111111111"
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

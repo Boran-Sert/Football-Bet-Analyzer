@@ -58,6 +58,7 @@ class Settings(BaseSettings):
 
     # ── Email (Resend) ──
     RESEND_API_KEY: str = ""
+    EMAIL_FROM_ADDRESS: str = "Sports Analyzer <noreply@yourdomain.com>"
     FRONTEND_URL: str = "http://localhost:3000"
     API_BASE_URL: str = "http://localhost:8000"
 

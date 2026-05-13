@@ -9,9 +9,7 @@ from core.redis_client import redis_manager
 from repositories.user_repository import UserRepository
 from schemas.auth import UserTier, UserInDB
 from services.payment.base import BasePaymentProvider
-from passlib.context import CryptContext
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from services.auth_service import pwd_context  # S-07 Fix: Tek merkezi pwd_context
 logger = logging.getLogger(__name__)
 
 

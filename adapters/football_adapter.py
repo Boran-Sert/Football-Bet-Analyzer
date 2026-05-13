@@ -6,8 +6,7 @@ standart MatchEntity formatina donusturur.
 
 import hashlib
 import logging
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
 
 from adapters.base_adapter import SportAdapter
 from adapters.parsers.csv_parsers import CSVParserStrategy, CSVParserFactory
@@ -44,10 +43,12 @@ class FootballAdapter(SportAdapter):
                 commence_time = datetime.fromisoformat(
                     event["commence_time"].replace("Z", "+00:00")
                 )
-                
+
                 # Deterministic ID (Faz 6 Fix: ID Collision / Zombie Matches)
-                external_id = self._generate_deterministic_id(norm_home, norm_away, commence_time)
-                
+                external_id = self._generate_deterministic_id(
+                    norm_home, norm_away, commence_time
+                )
+
                 entity = MatchEntity(
                     external_id=external_id,
                     sport=self.sport,
@@ -60,7 +61,7 @@ class FootballAdapter(SportAdapter):
                     odds=odds,
                     metrics={},
                     source=MatchSource.ODDS_API,
-                    updated_at=datetime.utcnow(),
+                    updated_at=datetime.now(timezone.utc),
                 )
                 entities.append(entity)
             except (KeyError, ValueError) as exc:
@@ -160,7 +161,7 @@ class FootballAdapter(SportAdapter):
         # Strategy Selection (Faz 6 Fix: Strategy-Factory Pattern ile dinamik secim)
         if not raw_rows:
             return []
-            
+
         try:
             parser = CSVParserFactory.get_parser(raw_rows[0])
         except ValueError as exc:
@@ -193,8 +194,12 @@ class FootballAdapter(SportAdapter):
         if not commence_time:
             return None
 
+        # Takim isimlerini normalize et (S-02 Fix: NameError engellendi)
+        norm_home = normalize_team_name(home)
+        norm_away = normalize_team_name(away)
+
         norm_date = commence_time.strftime("%Y-%m-%d")
-        raw_id = f"{league_code}_{norm_date}_{home}_{away}"
+        raw_id = f"{league_code}_{norm_date}_{norm_home}_{norm_away}"
         external_id = hashlib.md5(raw_id.encode()).hexdigest()
 
         # Oranlar ve Metrikler (Strategy üzerinden)
@@ -202,7 +207,7 @@ class FootballAdapter(SportAdapter):
         h2h = parser.get_h2h_odds(row)
         if h2h:
             odds["h2h"] = {"home": h2h[0], "draw": h2h[1], "away": h2h[2]}
-            
+
         totals = parser.get_totals_odds(row)
         if totals:
             odds["totals"] = {"over_2_5": totals[0], "under_2_5": totals[1]}
@@ -215,8 +220,8 @@ class FootballAdapter(SportAdapter):
             metrics["total_goals"] = goals[0] + goals[1]
 
         # Diger metrikler icin opsiyonel alanlar (Ingilizce formatta varsa)
-        if hasattr(parser, 'get_extra_metrics'):
-             metrics.update(parser.get_extra_metrics(row))
+        if hasattr(parser, "get_extra_metrics"):
+            metrics.update(parser.get_extra_metrics(row))
 
         return MatchEntity(
             external_id=external_id,
@@ -230,16 +235,18 @@ class FootballAdapter(SportAdapter):
             odds=odds,
             metrics=metrics,
             source=MatchSource.FOOTBALL_DATA_CSV,
-            updated_at=datetime.utcnow(),
+            updated_at=datetime.now(timezone.utc),
         )
 
-    def _generate_deterministic_id(self, home: str, away: str, commence_time: datetime) -> str:
+    def _generate_deterministic_id(
+        self, home: str, away: str, commence_time: datetime
+    ) -> str:
         """Mac icin deterministik bir ID uretir (Takimlar + Tarih)."""
         # Takim isimlerini normalize et (bosluklari at, kucuk harf yap)
         norm_home = home.replace(" ", "").lower()
         norm_away = away.replace(" ", "").lower()
         date_str = commence_time.strftime("%Y-%m-%d")
-        
+
         raw_id = f"{date_str}_{norm_home}_{norm_away}"
         return hashlib.md5(raw_id.encode()).hexdigest()
 

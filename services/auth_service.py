@@ -2,7 +2,7 @@
 
 import asyncio
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from passlib.context import CryptContext
 import jwt
@@ -79,7 +79,7 @@ class AuthService:
     def create_access_token(self, user_id: str, tier: UserTier, is_superuser: bool = False) -> str:
         if not user_id:
             raise ValueError("User ID is required for access token creation")
-        expire = datetime.utcnow() + timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_ACCESS_EXPIRE_MINUTES)
         to_encode = {
             "sub": user_id,
             "tier": tier.value,
@@ -115,7 +115,7 @@ class AuthService:
             raise ValueError("User ID is required for refresh token creation")
         jti = secrets.token_hex(32)
         expire_seconds = settings.JWT_REFRESH_EXPIRE_DAYS * 86400
-        expire = datetime.utcnow() + timedelta(days=settings.JWT_REFRESH_EXPIRE_DAYS)
+        expire = datetime.now(timezone.utc) + timedelta(days=settings.JWT_REFRESH_EXPIRE_DAYS)
 
         to_encode = {
             "sub": user_id,
@@ -132,14 +132,14 @@ class AuthService:
         
         # Faz 6 Fix: Bellek sızıntısı engellendi (ZSET + Expiry Score)
         # Score = timestamp of expiration
-        exp_timestamp = int(datetime.utcnow().timestamp()) + expire_seconds
+        exp_timestamp = int(datetime.now(timezone.utc).timestamp()) + expire_seconds
         set_key = f"user_tokens:{user_id}"
         
         async with redis.pipeline(transaction=True) as pipe:
             # 1. Yeni token'i ekle
             pipe.zadd(set_key, {jti: exp_timestamp})
             # 2. Suresi dolmus olanlari temizle (Memory leak fix)
-            pipe.zremrangebyscore(set_key, "-inf", int(datetime.utcnow().timestamp()))
+            pipe.zremrangebyscore(set_key, "-inf", int(datetime.now(timezone.utc).timestamp()))
             # 3. Set'in kendisi de bir noktada silinsin
             pipe.expire(set_key, expire_seconds)
             await pipe.execute()
@@ -212,10 +212,38 @@ class AuthService:
             pipe.delete(set_key)
             await pipe.execute()
 
+    async def rotate_refresh_token(self, refresh_token: str) -> tuple[str, str] | None:
+        """Refresh token rotation: dogrula → iptal et → yeni cift uret.
+
+        Distributed lock ile race condition onlenir.
+        Returns: (new_access_token, new_refresh_token) tuple veya None.
+        S-09 Fix: Router'dan service katmanina tasindi.
+        """
+        import hashlib
+
+        redis = redis_manager.get_client()
+        lock_key = f"lock:refresh:{hashlib.md5(refresh_token.encode()).hexdigest()}"
+
+        async with redis.lock(lock_key, timeout=10):
+            token_data = await self.verify_refresh_token(refresh_token)
+            if not token_data:
+                return None
+
+            # Rotate: eski token'i iptal et, yeni cift uret
+            await self.revoke_refresh_token(refresh_token)
+            new_access = self.create_access_token(
+                token_data.user_id, token_data.tier, token_data.is_superuser
+            )
+            new_refresh = await self.create_refresh_token(
+                token_data.user_id, token_data.tier, token_data.is_superuser
+            )
+
+        return new_access, new_refresh
+
     # ── Email verification ────────────────────────────────────────────────────
 
     def create_verification_token(self, email: str) -> str:
-        expire = datetime.utcnow() + timedelta(hours=24)
+        expire = datetime.now(timezone.utc) + timedelta(hours=24)
         to_encode = {"sub": email, "type": "email_verify", "exp": expire}
         return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
@@ -236,7 +264,7 @@ class AuthService:
     # ── Email change ──────────────────────────────────────────────────────────
 
     def create_email_change_token(self, user_id: str, new_email: str) -> str:
-        expire = datetime.utcnow() + timedelta(hours=2)
+        expire = datetime.now(timezone.utc) + timedelta(hours=2)
         to_encode = {
             "sub": user_id,
             "new_email": new_email,
@@ -268,7 +296,7 @@ class AuthService:
 
     def create_password_reset_token(self, email: str) -> str:
         """1 saatlik password reset JWT uretir."""
-        expire = datetime.utcnow() + timedelta(hours=1)
+        expire = datetime.now(timezone.utc) + timedelta(hours=1)
         to_encode = {"sub": email, "type": "password_reset", "exp": expire}
         return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 

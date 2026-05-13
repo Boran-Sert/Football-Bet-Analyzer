@@ -2,6 +2,7 @@
 
 Retry, timeout ve hata yonetimi iceren soyut sinif.
 Tum dis API istemcileri bunu miras alir.
+S-23 Fix: Her istekte yeni AsyncClient yerine persistent connection pool kullanilir.
 """
 
 import logging
@@ -34,6 +35,7 @@ class BaseAPIClient(ABC):
     """Soyut asenkron HTTP istemcisi.
 
     Alt siniflar `base_url` ve `_build_headers()` saglamalidir.
+    S-23 Fix: Persistent httpx.AsyncClient ile connection pooling.
     """
 
     def __init__(
@@ -47,6 +49,29 @@ class BaseAPIClient(ABC):
         self.timeout = timeout
         self.max_retries = max_retries
         self.verify_ssl = verify_ssl
+        # S-23 Fix: Persistent client — connection pooling saglar,
+        # her istekte TCP handshake maliyetini ortadan kaldirir.
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazy-init persistent httpx.AsyncClient."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout,
+                verify=self.verify_ssl,
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                    keepalive_expiry=30.0,
+                ),
+            )
+        return self._client
+
+    async def close(self) -> None:
+        """Client'i kapatir. Uygulama shutdown'inda cagrilmalidir."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     @abstractmethod
     def _build_headers(self) -> dict[str, str]:
@@ -74,13 +99,13 @@ class BaseAPIClient(ABC):
         url = f"{self.base_url}{path}" if self.base_url else path
         headers = self._build_headers()
         last_error: Exception | None = None
+        client = await self._get_client()
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify_ssl) as client:
-                    response = await client.request(
-                        method, url, params=params, headers=headers, **kwargs,
-                    )
+                response = await client.request(
+                    method, url, params=params, headers=headers, **kwargs,
+                )
 
                 # Kota asimi
                 if response.status_code == 429:

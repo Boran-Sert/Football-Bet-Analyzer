@@ -2,7 +2,7 @@ import logging
 import asyncio
 import iyzipay
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timezone
 from core.config import settings
 from core.pricing import PLANS
 from services.payment.base import BasePaymentProvider
@@ -137,5 +137,5 @@ class IyzicoProvider(BasePaymentProvider):
     def _format_date(self, dt: datetime | None) -> str:
         """Iyzico icin tarihi YYYY-MM-DD HH:mm:ss formatina donusturur."""
         if not dt:
-            dt = datetime.utcnow()
+            dt = datetime.now(timezone.utc)
         return dt.strftime("%Y-%m-%d %H:%M:%S")

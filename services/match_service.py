@@ -39,3 +39,12 @@ class MatchService:
     async def get_match_by_id(self, external_id: str) -> MatchInDB | None:
         """ID'ye gore mac detayini getirir (cachelenmez)."""
         return await self.repo.get_by_external_id(external_id)
+
+    async def count_upcoming_matches(
+        self, sport: str = "football", league_key: str | None = None
+    ) -> int:
+        """Yaklasan mac sayisini dondurur (S-04 Fix: Router->Repo erisimi engellendi)."""
+        query: dict = {"status": "upcoming", "sport": sport}
+        if league_key:
+            query["league_key"] = league_key
+        return await self.repo.count_matches(query)

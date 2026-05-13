@@ -3,10 +3,7 @@
 Veritabani repolarini, servisleri ve kimlik dogrulamayi HTTP endpointlerine enjekte eder.
 """
 
-from typing import Annotated
-
 from fastapi import Depends, HTTPException, status, Request
-from fastapi.security import OAuth2PasswordBearer
 
 from core.database import mongo
 from core.config import settings
@@ -16,8 +13,6 @@ from services.analysis_service import AnalysisService
 from services.auth_service import AuthService
 from services.match_service import MatchService
 from schemas.auth import UserInDB, UserTier
-
-# oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
 async def get_user_repo() -> UserRepository:
@@ -30,15 +25,21 @@ async def get_match_repo() -> MatchRepository:
     return MatchRepository(db)
 
 
-async def get_auth_service(repo: UserRepository = Depends(get_user_repo)) -> AuthService:
+async def get_auth_service(
+    repo: UserRepository = Depends(get_user_repo),
+) -> AuthService:
     return AuthService(repo)
 
 
-async def get_match_service(repo: MatchRepository = Depends(get_match_repo)) -> MatchService:
+async def get_match_service(
+    repo: MatchRepository = Depends(get_match_repo),
+) -> MatchService:
     return MatchService(repo)
 
 
-async def get_analysis_service(repo: MatchRepository = Depends(get_match_repo)) -> AnalysisService:
+async def get_analysis_service(
+    repo: MatchRepository = Depends(get_match_repo),
+) -> AnalysisService:
     return AnalysisService(repo)
 
 
@@ -49,7 +50,7 @@ async def get_current_user(
 ) -> UserInDB:
     """Gecerli kullaniciyi dondurur, ayni zamanda Request.state uzerine yazar."""
     token = request.cookies.get("access_token")
-    
+
     # Fallback to Authorization header if needed (optional, but good for API tools)
     if not token:
         auth_header = request.headers.get("Authorization")
@@ -61,18 +62,18 @@ async def get_current_user(
         detail="Gecersiz kimlik dogrulama bilgileri",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
+
     if not token:
         raise credentials_exception
 
     token_data = auth_service.decode_token(token)
     if token_data is None:
         raise credentials_exception
-        
+
     user = await user_repo.get_by_id(token_data.user_id)
     if user is None:
         raise credentials_exception
-        
+
     if not user.id:
         raise credentials_exception
 
@@ -80,28 +81,30 @@ async def get_current_user(
     request.state.user_id = user.id
     request.state.user_tier = user.tier.value
     request.state.is_superuser = user.is_superuser
-    
+
     return user
 
 
 async def get_current_active_user(
-    current_user: UserInDB = Depends(get_current_user)
+    current_user: UserInDB = Depends(get_current_user),
 ) -> UserInDB:
     """Dogrulanmis ve aktif bir kullanici mi diye kontrol eder (Email verify vs.)."""
     if settings.REQUIRE_EMAIL_VERIFICATION and not current_user.is_verified:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, 
-            detail="Bu işlem için e-posta adresinizi doğrulamanız gerekmektedir."
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bu işlem için e-posta adresinizi doğrulamanız gerekmektedir.",
         )
     return current_user
 
 
-async def require_pro_tier(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+async def require_pro_tier(
+    current_user: UserInDB = Depends(get_current_user),
+) -> UserInDB:
     """Sadece PRO veya ELITE katmanindaki kullanicilarin erisimine izin verir."""
     if current_user.tier not in [UserTier.PRO, UserTier.ELITE]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Bu islem icin daha yuksek bir uyelik katmani gereklidir."
+            detail="Bu islem icin daha yuksek bir uyelik katmani gereklidir.",
         )
     return current_user
 
@@ -111,6 +114,19 @@ async def require_admin(current_user: UserInDB = Depends(get_current_user)) -> U
     if not current_user.is_superuser:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Bu islem icin sistem yoneticisi (Admin) yetkisi gereklidir."
+            detail="Bu islem icin sistem yoneticisi (Admin) yetkisi gereklidir.",
         )
     return current_user
+
+
+# ── Billing DI (S-05 Fix: router'dan buraya tasindi) ─────────────────────────
+
+
+async def get_billing_service():
+    """BillingService'i DI ile saglar. Strategy Pattern Factory kullanimi."""
+    from services.billing_service import BillingService
+    from services.payment.factory import PaymentProviderFactory
+
+    db = mongo.get_db()
+    provider = PaymentProviderFactory.get_provider(settings.PAYMENT_PROVIDER)
+    return BillingService(user_repo=UserRepository(db), provider=provider)

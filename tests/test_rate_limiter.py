@@ -34,7 +34,7 @@ def mock_redis():
 @pytest.fixture
 def free_request():
     req = MagicMock()
-    req.state.user_tier = UserTier.FREE.value
+    req.state.user_tier = UserTier.STANDARD.value
     req.state.is_superuser = False
     req.state.user_id = "user_free"
     req.client.host = "127.0.0.1"
@@ -107,11 +107,15 @@ class TestRateLimiter:
             await limiter(free_request)  # Must not raise
 
     @pytest.mark.asyncio
-    async def test_uses_x_forwarded_for_header(self, mock_redis):
+    async def test_ignores_x_forwarded_for_for_anti_spoofing(self, mock_redis):
+        """Faz 6 Fix: Rate Limiter x-forwarded-for'u ignore eder (spoofing koruması).
+        
+        Doğrudan request.client.host kullanılmalıdır.
+        """
         req = MagicMock()
         req.state.user_id = None
         req.state.is_superuser = False
-        req.state.user_tier = UserTier.FREE.value
+        req.state.user_tier = UserTier.STANDARD.value
         req.headers = {"x-forwarded-for": "203.0.113.1, 10.0.0.1"}
         req.client.host = "10.0.0.1"
         mock_redis.pipe.execute.return_value = [0, 1, 1, True]
@@ -120,12 +124,12 @@ class TestRateLimiter:
         with patch("core.redis_client.redis_manager.get_client", return_value=mock_redis):
             await limiter(req)
 
-        # check that zadd was called on the pipe with the correct identifier in the key
-        # redis_key = f"rate_limit:sw:{identifier}"
+        # Anti-spoofing: client.host (10.0.0.1) kullanılmalı, X-Forwarded-For (203.0.113.1) DEĞİL
         call_args_list = mock_redis.pipe.zadd.call_args_list
-        found = False
+        found_client_host = False
         for args, kwargs in call_args_list:
-            if "203.0.113.1" in args[0]:
-                found = True
+            if "10.0.0.1" in args[0]:
+                found_client_host = True
                 break
-        assert found, f"IP 203.0.113.1 not found in zadd calls: {call_args_list}"
+        assert found_client_host, f"client.host (10.0.0.1) zadd çağrısında bulunamadı: {call_args_list}"
+

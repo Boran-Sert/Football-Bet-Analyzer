@@ -31,7 +31,7 @@ def sample_user():
             "email": "test@example.com",
             "display_name": "Test User",
             "hashed_password": "$2b$12$placeholder",
-            "tier": UserTier.FREE,
+            "tier": UserTier.STANDARD,
             "is_verified": True,
             "is_superuser": False,
         }

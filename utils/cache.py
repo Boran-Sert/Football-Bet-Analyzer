@@ -36,9 +36,10 @@ def cache_response(expire: int = 300, key_prefix: str = "cache"):
                 key_parts.append(str(arg))
 
             for k, v in sorted(kwargs.items()):
-                if k not in ["auth_service", "current_user", "db", "service"]:
-                    # Enum'ları .value ile stringe çevir
-                    val = v.value if hasattr(v, "value") else str(v)
+                if k in ["auth_service", "current_user", "db", "service"]:
+                    continue
+                # Enum'ları .value ile stringe çevir
+                val = v.value if hasattr(v, "value") else str(v)
                 key_parts.append(f"{k}:{val}")
 
             cache_key = ":".join(key_parts)
