@@ -1,387 +1,145 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { MatchResponse, SimilarMatchResult } from "@/types";
-import Filters from "@/components/Filters";
-import UpcomingMatchesTable from "@/components/UpcomingMatchesTable";
-import HistoricalAnalysis from "@/components/HistoricalAnalysis";
-import SimilarMatchesTable from "@/components/SimilarMatchesTable";
-import SummaryStats from "@/components/SummaryStats";
-import { useToast } from "@/components/Toast";
-import { API_URL } from "@/config/constants";
+import Link from "next/link";
+import { ArrowRightIcon, ChartBarIcon, ServerStackIcon, TrophyIcon, BoltIcon } from "@heroicons/react/24/outline";
 
-export default function Home() {
-  const { showToast } = useToast();
-  const [matches, setMatches] = useState<MatchResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedLeague, setSelectedLeague] = useState("");
-  
-  const [selectedMatch, setSelectedMatch] = useState<MatchResponse | null>(null);
-  
-  const [limit, setLimit] = useState(10);
-  const [similarMatches, setSimilarMatches] = useState<SimilarMatchResult[]>([]);
-  const [loadingAnalysis, setLoadingAnalysis] = useState(false);
-  const [userTier, setUserTier] = useState<string>("standard"); 
-  const [isSuperuser, setIsSuperuser] = useState<boolean>(false);
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
-  const [selectedTimeRange, setSelectedTimeRange] = useState<string>("all");
-
-  // Fetch upcoming matches
-  useEffect(() => {
-    const fetchMatches = async (isSilent = false) => {
-      if (!isSilent) {
-        setLoading(true);
-        setSelectedMatch(null);
-        setSimilarMatches([]);
-      }
-      
-      try {
-        let url = `${API_URL}/api/v1/football/matches/?`;
-        const params = new URLSearchParams();
-        
-        if (selectedLeague) params.append("league", selectedLeague);
-        
-        if (selectedTimeRange !== "all") {
-          const [start, end] = selectedTimeRange.split("-");
-          params.append("start_hour", start);
-          params.append("end_hour", end === "00" ? "24" : end);
-        }
-        
-        url += params.toString();
-
-        const response = await fetch(url);
-        if (!response.ok) throw new Error("Backend unreachable");
-
-        const json = await response.json();
-        const data = json?.data || (Array.isArray(json) ? json : []);
-        setMatches(data);
-      } catch (error) {
-        console.error("Fetch error:", error);
-      } finally {
-        if (!isSilent) setLoading(false);
-      }
-    };
-
-    // Initial fetch
-    fetchMatches();
-
-    // Setup polling (every 2 minutes) with Visibility API check (Faz 5 Fix)
-    const interval = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        fetchMatches(true);
-      }
-    }, 120000);
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        fetchMatches(true);
-      }
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [selectedLeague, selectedTimeRange]);
-
-  // Fetch User Tier
-  useEffect(() => {
-    const fetchUser = async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
-          credentials: "include"
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setUserTier(data.tier);
-          setIsSuperuser(data.is_superuser || false);
-          if (data.tier === "elite") setLimit(20);
-          if (data.tier === "pro") setLimit(10);
-          if (data.tier === "standard") setLimit(3);
-        } else {
-          setUserTier("standard");
-          setLimit(3);
-        }
-      } catch (err) {
-        console.error("User fetch error:", err);
-        setUserTier("standard");
-        setLimit(3);
-      }
-    };
-    fetchUser();
-  }, []);
-
-  const handleSelectMatch = (match: MatchResponse) => {
-    // If selecting the same match, toggle it off
-    if (selectedMatch?.external_id === match.external_id) {
-      setSelectedMatch(null);
-      setSimilarMatches([]);
-    } else {
-      setSelectedMatch(match);
-      setSimilarMatches([]); // Clear previous analysis
-    }
-  };
-
-  const handleFetchAnalysis = async () => {
-    if (!selectedMatch) return;
-    setLoadingAnalysis(true);
-    setSimilarMatches([]); // Clear previous results to show loading state clearly
-    
-    try {
-      console.log(`Analiz başlatılıyor: ${selectedMatch.external_id} | Limit: ${limit}`);
-      const res = await fetch(`${API_URL}/api/v1/football/analysis/similar/${selectedMatch.external_id}?limit=${limit}`, {
-        credentials: "include",
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ detail: "Bilinmeyen bir hata oluştu" }));
-        const errMsg = Array.isArray(errorData.detail) ? errorData.detail.map((e: any) => e.msg).join(", ") : errorData.detail;
-        throw new Error(errMsg || "Analiz yapılamadı.");
-      }
-
-      const data = await res.json();
-      console.log("Backend'den gelen veri:", data);
-      
-      // Backend bazen direkt liste, bazen {data: [...]} şeklinde dönebilir. Her iki durumu da handle edelim.
-      const resultList = Array.isArray(data) ? data : (data.results || data.data || []);
-      setSimilarMatches(resultList);
-      
-      if (resultList.length === 0) {
-        console.warn("Benzer maç bulunamadı.");
-      }
-    } catch (err: any) {
-      console.error("Analiz Hatası:", err);
-      showToast(err.message || "Analiz sırasında bir hata oluştu.", "error");
-      setSimilarMatches([]);
-    } finally {
-      setLoadingAnalysis(false);
-    }
-  };
-
-  const handleTriggerSync = async () => {
-    setIsSyncing(true);
-    try {
-      const res = await fetch(`${API_URL}/api/v1/admin/system/trigger-ingestion`, {
-        method: "POST",
-        credentials: "include"
-      });
-      if (res.ok) {
-        showToast("Maç verileri birkaç dakika içinde güncellenmiş olacaktır.", "success");
-      } else {
-        showToast("Admin yetkiniz olmayabilir veya sistem meşgul.", "error");
-      }
-    } catch (err) {
-      showToast("Sunucuya bağlanılamadı. Lütfen tekrar deneyin.", "error");
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const recommendedMatches = [...matches]
-    .sort((a, b) => {
-      const maxA = Math.max(a.odds.h2h?.home || 0, a.odds.h2h?.draw || 0, a.odds.h2h?.away || 0);
-      const maxB = Math.max(b.odds.h2h?.home || 0, b.odds.h2h?.draw || 0, b.odds.h2h?.away || 0);
-      return maxB - maxA;
-    })
-    .slice(0, 5);
-
-  const stats = similarMatches.reduce((acc, item) => {
-    const hg = item.match.metrics.home_goals || 0;
-    const ag = item.match.metrics.away_goals || 0;
-    if (hg > ag) acc.home++;
-    else if (hg < ag) acc.away++;
-    else acc.draw++;
-    return acc;
-  }, { home: 0, draw: 0, away: 0 });
-
-  const totalSimilar = similarMatches.length;
-  const homePct = totalSimilar > 0 ? Math.round((stats.home / totalSimilar) * 100) : 0;
-  const drawPct = totalSimilar > 0 ? Math.round((stats.draw / totalSimilar) * 100) : 0;
-  const awayPct = totalSimilar > 0 ? Math.round((stats.away / totalSimilar) * 100) : 0;
-
+export default function LandingPage() {
   return (
-    <div className="flex flex-col gap-8">
-      
-      {/* TOP ROW: RECOMMENDED MATCHES */}
-      <div className="grid grid-cols-1 gap-6">
-        <div className="glass rounded-[2rem] p-8 card-shadow emerald-glow relative overflow-hidden">
-          <div className="flex flex-col gap-6 relative z-10">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-500 uppercase tracking-widest">Günün Önerilen Maçları (En Yüksek Oranlar)</span>
-              <div className="flex gap-2">
-                <span className="px-3 py-1 rounded-full bg-primary/10 text-primary text-[10px] font-black uppercase">Top 5 Maç</span>
-              </div>
-            </div>
+    <div className="min-h-screen bg-[#050505] text-white flex flex-col relative overflow-hidden font-sans">
 
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-              {recommendedMatches.length > 0 ? recommendedMatches.map((m) => (
-                <div key={m.external_id} onClick={() => handleSelectMatch(m)} className="bg-white/5 border border-white/5 hover:border-primary/30 p-4 rounded-2xl transition-all cursor-pointer group">
-                  <div className="flex flex-col gap-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase truncate">{m.league_title}</span>
-                    <span className="text-sm font-black text-white truncate">{m.home_team}</span>
-                    <span className="text-sm font-black text-white truncate">{m.away_team}</span>
-                  </div>
-                  <div className="mt-3 flex items-center justify-between">
-                    <span className="text-[10px] font-black text-primary">En Yüksek Oran: {Math.max(m.odds.h2h?.home || 0, m.odds.h2h?.draw || 0, m.odds.h2h?.away || 0).toFixed(2)}</span>
-                  </div>
-                </div>
-              )) : (
-                <div className="col-span-5 text-center py-8 text-slate-600 text-xs font-bold uppercase tracking-widest">Maç bulunamadı</div>
-              )}
-            </div>
+      {/* BACKGROUND EFFECTS */}
+      <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-primary/20 blur-[150px] rounded-full pointer-events-none" />
+      <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-primary/10 blur-[150px] rounded-full pointer-events-none" />
+      <div className="absolute inset-0 bg-[url('/grid.svg')] bg-center opacity-10 pointer-events-none" />
+
+      {/* HEADER */}
+      <header className="relative z-10 flex items-center justify-between px-8 py-6 max-w-7xl mx-auto w-full">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-primary flex items-center justify-center shadow-[0_0_20px_rgba(16,185,129,0.4)]">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z" /></svg>
           </div>
-          {/* Decorative Background */}
-          <div className="absolute -bottom-12 -right-12 w-64 h-64 bg-primary/10 blur-[100px] rounded-full"></div>
+          <span className="text-2xl font-black tracking-tighter text-white uppercase italic">Sports-Analyzer</span>
         </div>
-      </div>
+        <div className="flex items-center gap-6">
+          <Link href="/login" className="text-sm font-semibold text-slate-300 hover:text-white transition-colors">
+            Giriş Yap
+          </Link>
+          <Link href="/register" className="text-sm font-bold bg-white text-black px-5 py-2.5 rounded-full hover:bg-slate-200 hover:scale-105 transition-all shadow-[0_0_15px_rgba(255,255,255,0.2)]">
+            Hemen Başla
+          </Link>
+        </div>
+      </header>
 
-      {/* MAIN CONTENT GRID */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
-        
-        {/* LEFT: MATCHES TABLE */}
-        <div className="xl:col-span-3 flex flex-col gap-6">
-          <div className="flex items-center justify-between px-2">
-            <h2 className="text-lg font-bold text-white flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
-                Yaklaşan Maçlar
-              </div>
-              
-              {isSuperuser && (
-                <button 
-                  onClick={handleTriggerSync}
-                  disabled={isSyncing}
-                  className="px-4 py-1.5 bg-amber-500/10 border border-amber-500/30 text-amber-500 text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-amber-500 hover:text-black transition-all disabled:opacity-30"
-                >
-                  {isSyncing ? "BAŞLATILIYOR..." : "Verileri Manuel Güncelle"}
-                </button>
-              )}
-            </h2>
-            <div className="flex items-center gap-4">
-              <div className="w-full md:w-auto min-w-[400px]">
-                <Filters 
-                  onLeagueChange={setSelectedLeague} 
-                  onTimeRangeChange={setSelectedTimeRange}
-                />
-              </div>
-            </div>
-          </div>
-
-          {loading ? (
-            <div className="glass rounded-[2rem] p-20 flex flex-col items-center justify-center gap-4">
-              <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-primary"></div>
-              <span className="text-slate-500 font-bold text-xs uppercase tracking-widest">Maçlar Yükleniyor...</span>
-            </div>
-          ) : (
-            <div className="glass rounded-[2rem] overflow-hidden card-shadow">
-              <UpcomingMatchesTable 
-                matches={matches} 
-                selectedMatchId={selectedMatch?.external_id || null}
-                onSelectMatch={handleSelectMatch}
-              />
-            </div>
-          )}
+      {/* HERO SECTION */}
+      <main className="flex-1 flex flex-col items-center justify-center text-center px-4 relative z-10 py-20 mt-10">
+        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-primary text-xs font-bold mb-8 uppercase tracking-widest animate-pulse">
+          <BoltIcon className="w-4 h-4" />
+          Profesyonel Bahis Analizi Artık Seninle
         </div>
 
-        {/* RIGHT: REPARTITION / STATS AREA */}
-        <div className="xl:col-span-1 flex flex-col gap-6">
-           <h2 className="text-lg font-bold text-white px-2">Dağılım</h2>
-           <div className="glass rounded-[2rem] p-8 card-shadow flex-1 flex flex-col items-center justify-center min-h-[400px]">
-              {similarMatches.length > 0 ? (
-                <div className="w-full flex flex-col gap-8">
-                   <div className="relative w-48 h-48 mx-auto">
-                      <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
-                        {/* Background */}
-                        <circle cx="50" cy="50" r="40" fill="transparent" stroke="currentColor" strokeWidth="10" className="text-white/5" />
-                        {/* Home Win Segment */}
-                        <circle cx="50" cy="50" r="40" fill="transparent" stroke="#10b981" strokeWidth="10" strokeDasharray={`${homePct * 2.51} 251`} strokeLinecap="round" />
-                        {/* Draw Segment (approximate positioning) */}
-                        <circle cx="50" cy="50" r="40" fill="transparent" stroke="#eab308" strokeWidth="10" strokeDasharray={`${drawPct * 2.51} 251`} strokeDashoffset={`${-homePct * 2.51}`} strokeLinecap="round" />
-                        {/* Away Win Segment */}
-                        <circle cx="50" cy="50" r="40" fill="transparent" stroke="#ef4444" strokeWidth="10" strokeDasharray={`${awayPct * 2.51} 251`} strokeDashoffset={`${-(homePct + drawPct) * 2.51}`} strokeLinecap="round" />
-                      </svg>
-                      <div className="absolute inset-0 flex flex-col items-center justify-center">
-                         <span className="text-3xl font-black text-white">%{Math.max(homePct, drawPct, awayPct)}</span>
-                         <span className="text-[10px] font-bold text-slate-500 uppercase">
-                           {homePct >= drawPct && homePct >= awayPct ? "MS 1" : drawPct >= awayPct ? "MS 0" : "MS 2"}
-                         </span>
-                      </div>
-                   </div>
-                   <div className="space-y-3 mt-4 w-full">
-                      <div className="flex items-center justify-between text-xs font-bold">
-                         <div className="flex items-center gap-2 text-slate-400">
-                            <span className="w-2 h-2 rounded-full bg-[#10b981]"></span> Ev Sahibi (MS 1)
-                         </div>
-                         <span className="text-white">{stats.home} Maç (%{homePct})</span>
-                      </div>
-                      <div className="flex items-center justify-between text-xs font-bold">
-                         <div className="flex items-center gap-2 text-slate-400">
-                            <span className="w-2 h-2 rounded-full bg-[#eab308]"></span> Beraberlik (MS 0)
-                         </div>
-                         <span className="text-white">{stats.draw} Maç (%{drawPct})</span>
-                      </div>
-                      <div className="flex items-center justify-between text-xs font-bold">
-                         <div className="flex items-center gap-2 text-slate-400">
-                            <span className="w-2 h-2 rounded-full bg-[#ef4444]"></span> Deplasman (MS 2)
-                         </div>
-                         <span className="text-white">{stats.away} Maç (%{awayPct})</span>
-                      </div>
-                   </div>
-                </div>
-              ) : (
-                <div className="text-center opacity-20">
-                   <svg className="mx-auto mb-4" xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-                   <p className="text-sm font-bold uppercase tracking-widest">Analiz Bekleniyor</p>
-                </div>
-              )}
-           </div>
+        <h1 className="text-5xl md:text-7xl font-black tracking-tighter mb-8 leading-tight max-w-4xl">
+          SEZGİLERİNİ BIRAK, <br />
+          <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-emerald-400">MATEMATİĞE GÜVEN.</span>
+        </h1>
+
+        <p className="text-lg md:text-xl text-slate-400 max-w-2xl mb-12 font-medium">
+          Duygusal bahisleri kenara bırakın. Gelişmiş veri algoritmalarımız geçmiş maçların dinamiklerini hesaplayarak sıradan bahisçilerin göremediği fırsatları ortaya çıkarır.
+        </p>
+
+        <div className="flex flex-col sm:flex-row items-center gap-4">
+          <Link href="/register" className="flex items-center gap-2 bg-primary text-black px-8 py-4 rounded-full font-black text-lg hover:scale-105 transition-all shadow-[0_0_30px_rgba(16,185,129,0.4)]">
+            Sisteme Katıl <ArrowRightIcon className="w-5 h-5 stroke-[3]" />
+          </Link>
+          <Link href="/pricing" className="px-8 py-4 rounded-full font-bold text-white bg-white/5 border border-white/10 hover:bg-white/10 transition-colors">
+            Planları İncele
+          </Link>
         </div>
-      </div>
+      </main>
 
-      {/* LOWER SECTION: HISTORICAL ANALYSIS */}
-      {selectedMatch && (
-        <section className="flex flex-col gap-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="flex items-center justify-between px-2">
-             <h2 className="text-lg font-bold text-white">Detaylı Benzerlik Analizi</h2>
-             <span className="text-xs font-bold text-primary/50 uppercase tracking-widest">Seçili Maç: {selectedMatch.home_team} vs {selectedMatch.away_team}</span>
-          </div>
-          
-          <div className="glass rounded-[2rem] p-8 card-shadow">
-            <HistoricalAnalysis 
-              match={selectedMatch}
-              limit={limit}
-              onLimitChange={setLimit}
-              userTier={userTier}
-              onFetch={handleFetchAnalysis}
-              loading={loadingAnalysis}
-            />
-          </div>
+      {/* HOW IT WORKS SECTION */}
+      <section className="relative z-10 max-w-7xl mx-auto w-full px-8 py-24">
+        <div className="text-center mb-16">
+          <h2 className="text-3xl md:text-5xl font-black tracking-tight mb-4">SİSTEM NASIL ÇALIŞIR?</h2>
+          <p className="text-slate-400">İleri düzey veri işleme altyapısıyla hata payını en aza indirin.</p>
+        </div>
 
-          {similarMatches.length > 0 ? (
-            <div className="grid grid-cols-1 gap-8 mt-4">
-              <div className="glass rounded-[2rem] overflow-hidden card-shadow">
-                <SimilarMatchesTable results={similarMatches} />
-              </div>
-              
-              <div className="glass rounded-[2rem] p-8 card-shadow">
-                <h3 className="text-lg font-bold text-white mb-6">İstatistik Özeti</h3>
-                <SummaryStats results={similarMatches} />
-              </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+          {/* Feature 1 */}
+          <div className="bg-white/[0.03] border border-white/10 rounded-3xl p-8 backdrop-blur-md hover:bg-white/[0.05] hover:-translate-y-2 transition-all duration-300">
+            <div className="w-14 h-14 bg-blue-500/10 border border-blue-500/20 rounded-2xl flex items-center justify-center mb-6">
+              <ServerStackIcon className="w-7 h-7 text-blue-400" />
             </div>
-          ) : !loadingAnalysis && (
-            <div className="mt-8 glass rounded-[2rem] p-12 flex flex-col items-center justify-center gap-4 card-shadow border border-white/5 opacity-60">
-               <div className="w-16 h-16 bg-white/5 rounded-full flex items-center justify-center">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-slate-500"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-               </div>
-               <p className="text-slate-500 text-xs font-black uppercase tracking-widest text-center">Veritabanında benzer oranlara sahip maç bulunamadı.</p>
-               <p className="text-slate-700 text-[10px] font-bold uppercase tracking-tight text-center max-w-[250px]">Lütfen farklı bir maç seçin veya benzerlik limitini değiştirerek tekrar deneyin.</p>
-            </div>
-          )}
-        </section>
-      )}
+            <h3 className="text-xl font-bold mb-3">Derin Veri Toplama</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Dünya genelindeki tüm liglerden anlık oran verileri, takım form durumları ve tarihsel eşleşmeler milisaniyeler içinde toplanır.
+            </p>
+          </div>
 
+          {/* Feature 2 */}
+          <div className="bg-white/[0.03] border border-white/10 rounded-3xl p-8 backdrop-blur-md hover:bg-white/[0.05] hover:-translate-y-2 transition-all duration-300">
+            <div className="w-14 h-14 bg-primary/10 border border-primary/20 rounded-2xl flex items-center justify-center mb-6">
+              <ChartBarIcon className="w-7 h-7 text-primary" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Matematiksel Filtreleme</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Geliştirdiğimiz özel algoritmalar, binlerce geçmiş maçı matematiksel mesafe formülleriyle analiz ederek en yüksek benzerlikteki şablonları bulur.
+            </p>
+          </div>
+
+          {/* Feature 3 */}
+          <div className="bg-white/[0.03] border border-white/10 rounded-3xl p-8 backdrop-blur-md hover:bg-white/[0.05] hover:-translate-y-2 transition-all duration-300">
+            <div className="w-14 h-14 bg-yellow-500/10 border border-yellow-500/20 rounded-2xl flex items-center justify-center mb-6">
+              <TrophyIcon className="w-7 h-7 text-yellow-400" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Kazandıran Strateji</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Duygusal yanılmalardan arınmış, tamamen geçmiş verilere ve istatistiksel trendlere dayanan net analizlerle daima bir adım önde olun.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* FINAL CTA */}
+      <section className="relative z-10 py-24 px-8 mt-12 bg-gradient-to-b from-transparent to-primary/10">
+        <div className="max-w-4xl mx-auto text-center">
+          <h2 className="text-4xl md:text-6xl font-black tracking-tight mb-8">
+            KAZANANLAR KULÜBÜNE <br /> ADIM ATIN.
+          </h2>
+          <p className="text-xl text-slate-300 mb-10 max-w-2xl mx-auto">
+            Sıradan oyuncular tahminde bulunur. Profesyoneller analiz eder. Analiz altyapımızın gücünü arkanıza alarak fark yaratın.
+          </p>
+          <Link href="/register" className="inline-flex items-center justify-center w-full sm:w-auto bg-white text-black px-12 py-5 rounded-full font-black text-xl hover:bg-slate-200 hover:scale-105 transition-all shadow-[0_0_40px_rgba(255,255,255,0.3)]">
+            HEMEN HESAP OLUŞTUR
+          </Link>
+        </div>
+      </section>
+
+      {/* LEGAL DISCLAIMER */}
+      <section className="relative z-10 py-12 px-8 bg-gradient-to-b from-primary/10 to-transparent">
+        <div className="max-w-7xl mx-auto text-center">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-[10px] font-black uppercase tracking-widest mb-4">
+            Yasal Uyarı
+          </div>
+          <p className="text-xs text-slate-500 max-w-4xl mx-auto leading-relaxed">
+            Sports-Analyzer platformu, yalnızca geçmiş maç verileri ve matematiksel hesaplamalara dayalı istatistiksel sonuçlar sunar. <strong>Sistemimizde yer alan hiçbir veri, analiz veya tahmin kesinlikle bahis tavsiyesi, yönlendirme veya teşvik niteliği taşımaz.</strong> Platformumuz hiçbir şekilde bahis oynatmaz, yasadışı bahis faaliyetlerini desteklemez ve teşvik etmez. Sunulan verilerin kullanımından doğabilecek her türlü maddi/manevi zarar ve yasal sorumluluk tamamen kullanıcının kendisine aittir. Kullanıcılar bulundukları ülkenin yasalarına uymakla yükümlüdür.
+          </p>
+        </div>
+      </section>
+
+      {/* FOOTER */}
+      <footer className="relative z-10 border-t border-white/10 py-8 px-8 mt-auto">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded bg-primary flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z" /></svg>
+            </div>
+            <span className="text-sm font-bold text-white uppercase italic">Sports-Analyzer</span>
+          </div>
+          <p className="text-xs text-slate-500 font-medium">
+            © {new Date().getFullYear()} Sports Analyzer. Tüm hakları saklıdır.
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }

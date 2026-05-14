@@ -29,7 +29,7 @@ from utils.exceptions import (
     validation_exception_handler,
 )
 
-from core.logger import logger
+from core.logger import logger, shutdown_logging
 
 # setup_logging() is already called on import in core.logger
 
@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
     logger.info("Redis baglantisi kapatildi.")
     await mongo.close()
     logger.info("MongoDB baglantisi kapatildi.")
+    shutdown_logging()
 
 
 app = FastAPI(

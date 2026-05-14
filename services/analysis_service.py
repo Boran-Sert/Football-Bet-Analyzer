@@ -119,7 +119,8 @@ class AnalysisService:
             try:
                 # MongoDB aggregation 'distance' alanını hesaplayıp içine koydu
                 dist = doc.get("distance", 0.0)
-                sim_pct = max(0.0, 100.0 - (dist * 33.3))
+                # ÖNEMLİ-4 Fix: Lineer olcekleme — threshold'da %0, dist=0'da %100
+                sim_pct = max(0.0, (1 - dist / DISTANCE_THRESHOLD) * 100)
 
                 results.append(
                     SimilarMatchResult(

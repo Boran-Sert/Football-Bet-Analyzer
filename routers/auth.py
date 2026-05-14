@@ -45,6 +45,20 @@ from utils.dependencies import get_auth_service, get_current_active_user
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
 
+# ── Cookie helper ─────────────────────────────────────────────────────────────
+
+
+def _get_cookie_delete_params() -> dict:
+    """Cookie silme parametreleri — set ile ayni path/flag'leri kullanir."""
+    is_prod = settings.ENVIRONMENT == "production"
+    return {
+        "path": "/",
+        "httponly": True,
+        "secure": is_prod,
+        "samesite": "lax",
+    }
+
+
 # ── Register ──────────────────────────────────────────────────────────────────
 
 
@@ -226,13 +240,7 @@ async def logout(
     if refresh_token:
         await auth_service.revoke_refresh_token(refresh_token)
     # Cookieleri temizle (Faz 6 Fix: Ghost Cookies)
-    is_prod = settings.ENVIRONMENT == "production"
-    cookie_params = {
-        "path": "/",
-        "httponly": True,
-        "secure": is_prod,
-        "samesite": "lax",
-    }
+    cookie_params = _get_cookie_delete_params()
     response.delete_cookie("access_token", **cookie_params)
     response.delete_cookie("refresh_token", **cookie_params)
 
@@ -399,8 +407,9 @@ async def delete_account(
             detail="Sifre hatali veya hesap silinemedi.",
         )
 
-    # Cookieleri temizle
-    response.delete_cookie("access_token")
-    response.delete_cookie("refresh_token")
+    # Cookieleri temizle (KRİTİK-2 Fix: logout ile ayni parametreler)
+    cookie_params = _get_cookie_delete_params()
+    response.delete_cookie("access_token", **cookie_params)
+    response.delete_cookie("refresh_token", **cookie_params)
 
     return {"message": "Hesabiniz ve tum verileriniz basariyla silindi."}

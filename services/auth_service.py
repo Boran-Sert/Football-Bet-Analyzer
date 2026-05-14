@@ -255,7 +255,7 @@ class AuthService:
             if not email or token_type != "email_verify":
                 return False
             user = await self.repo.get_by_email(email)
-            if not user:
+            if not user or not user.id:
                 return False
             return await self.repo.verify_user(user.id)
         except PyJWTError:
@@ -339,4 +339,6 @@ class AuthService:
         if not user or not await self.verify_password(password, user.hashed_password):
             return False
         
+        # Tum aktif refresh token'lari Redis'ten temizle (KRİTİK-1 Fix)
+        await self.revoke_all_user_tokens(user_id)
         return await self.repo.delete(user_id)

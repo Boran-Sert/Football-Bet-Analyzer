@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 
 const NAV_ITEMS = [
-  { name: "Analizler", href: "/", icon: (props: any) => (
+  { name: "Analizler", href: "/dashboard", icon: (props: any) => (
     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
   )},
   { name: "Planlar", href: "/pricing", icon: (props: any) => (
@@ -28,12 +28,12 @@ export default function Sidebar() {
   return (
     <aside className="w-64 h-screen fixed left-0 top-0 bg-[#050505] border-r border-white/5 flex flex-col z-50">
       {/* LOGO */}
-      <div className="p-6 flex items-center gap-3">
-        <div className="w-8 h-8 rounded bg-primary flex items-center justify-center emerald-glow">
-           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z"/></svg>
-        </div>
-        <span className="text-xl font-black tracking-tighter text-white uppercase italic">Sports-Analyzer</span>
-      </div>
+        <Link href="/dashboard" className="p-6 flex items-center gap-3">
+          <div className="w-8 h-8 rounded bg-primary flex items-center justify-center emerald-glow">
+             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z"/></svg>
+          </div>
+          <span className="text-xl font-black tracking-tighter text-white uppercase italic">Sports-Analyzer</span>
+        </Link>
 
       {/* MAIN NAV */}
       <nav className="flex-1 px-4 mt-4 space-y-1">

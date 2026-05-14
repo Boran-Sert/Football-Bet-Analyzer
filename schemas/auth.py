@@ -1,6 +1,6 @@
 """Kimlik dogrulama veri transfer objeleri."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, EmailStr, Field
@@ -31,7 +31,7 @@ class UserInDB(BaseModel):
     tier: UserTier = UserTier.STANDARD
     is_verified: bool = False
     is_superuser: bool = False
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login_at: datetime | None = None
 
     model_config = {"from_attributes": True, "populate_by_name": True}

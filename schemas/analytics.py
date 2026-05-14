@@ -1,6 +1,6 @@
 """Telemetri / analitik veri transfer objeleri."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -15,4 +15,4 @@ class RequestLog(BaseModel):
     process_time_ms: float
     ip_address: str = ""
     user_agent: str = ""
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

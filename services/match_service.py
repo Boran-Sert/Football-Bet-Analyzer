@@ -40,6 +40,7 @@ class MatchService:
         """ID'ye gore mac detayini getirir (cachelenmez)."""
         return await self.repo.get_by_external_id(external_id)
 
+    @cache_response(expire=300, key_prefix="matches:count")
     async def count_upcoming_matches(
         self, sport: str = "football", league_key: str | None = None
     ) -> int:

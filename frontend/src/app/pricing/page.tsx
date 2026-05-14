@@ -35,43 +35,11 @@ export default function PricingPage() {
     fetchPlans();
   }, []);
 
-  const handleCheckout = async (planId: string) => {
+  const handleCheckout = (planId: string) => {
     setProcessingId(planId);
-    try {
-      // Auth check via cookies (Faz 1)
-      const authRes = await fetch(`${API_URL}/api/v1/auth/me`, {
-        credentials: "include"
-      });
-      
-      if (!authRes.ok) {
-        // Redirect to register with plan_id using Next.js router for better UX
-        router.push(`/register?plan=${planId}`);
-        return;
-      }
-
-      const res = await fetch(`${API_URL}/api/v1/billing/checkout`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({ plan_id: planId }),
-      });
-
-      const data = await res.json();
-      if (res.ok && data.checkout_url) {
-        // Iyzico checkout is an external URL, so window.location is correct here
-        window.location.href = data.checkout_url;
-      } else {
-        const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
-        alert(typeof errMsg === "string" ? errMsg : "Ödeme oturumu oluşturulamadı.");
-      }
-    } catch (err) {
-      console.error("Checkout error:", err);
-      alert("Bir hata oluştu.");
-    } finally {
-      setProcessingId(null);
-    }
+    // Her zaman kayit/onay sayfasina yonlendir
+    router.push(`/register?plan=${planId}`);
+    setProcessingId(null);
   };
 
   if (loading) {

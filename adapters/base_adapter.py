@@ -33,7 +33,7 @@ class SportAdapter(ABC):
         ...
 
     @abstractmethod
-    def normalize_historical(self, raw_rows: list[dict]) -> list[MatchEntity]:
+    def normalize_historical(self, raw_rows: list[dict], league_code: str = "") -> list[MatchEntity]:
         """CSV / tarihsel ham veriyi MatchEntity listesine donusturur.
 
         Args:

@@ -26,7 +26,7 @@ export default function Login() {
       const data = await response.json();
       if (response.ok) {
         window.dispatchEvent(new Event('auth-change'));
-        router.push("/");
+        router.push("/dashboard");
       } else {
         const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
         setError(typeof errMsg === "string" ? errMsg : "Giriş yapılamadı. Bilgilerinizi kontrol edin.");

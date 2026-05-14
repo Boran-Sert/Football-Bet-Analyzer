@@ -10,6 +10,8 @@ from repositories.user_repository import UserRepository
 from schemas.auth import UserTier, UserInDB
 from services.payment.base import BasePaymentProvider
 from services.auth_service import pwd_context  # S-07 Fix: Tek merkezi pwd_context
+from clients.telegram_client import telegram_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +21,8 @@ class BillingService:
     def __init__(self, user_repo: UserRepository, provider: BasePaymentProvider):
         self.repo = user_repo
         self.provider = provider
-        self.redis = redis_manager.get_client()
+        # KALİTE-2 Fix: Constructor'da redis baglantisi cekilmez,
+        # her metod cagrisinda redis_manager.get_client() kullanilir.
 
     async def create_checkout_session(
         self,
@@ -43,7 +46,9 @@ class BillingService:
         reg_data["hashed_password"] = await asyncio.to_thread(pwd_context.hash, reg_data["password"])
         del reg_data["password"]
         
-        await self.redis.setex(f"pending_reg:{temp_id}", 3600, json.dumps(reg_data))
+        redis = redis_manager.get_client()
+        # KRİTİK-4 Fix: TTL 24 saat — Webhook gecikmelerine karsi daha dayanikli
+        await redis.setex(f"pending_reg:{temp_id}", 86400, json.dumps(reg_data))
         
         return await self.provider.create_checkout_session(
             user_id=temp_id,
@@ -72,9 +77,18 @@ class BillingService:
 
         # Eger bu bir misafir kaydiysa (GUEST_ prefix)
         if str(user_id).startswith("guest_"):
-            reg_json = await self.redis.get(f"pending_reg:{user_id}")
+            redis = redis_manager.get_client()
+            reg_json = await redis.get(f"pending_reg:{user_id}")
             if not reg_json:
                 logger.error("Misafir kayit verisi bulunamadi: %s", user_id)
+                # KRİTİK-4 Fix: Telegram alert — odeme alindi ama kayit verisi expired
+                await telegram_client.send_alert(
+                    f"🚨 <b>GUEST CHECKOUT FAILURE</b>\n"
+                    f"Temp ID: <code>{user_id}</code>\n"
+                    f"Plan: <code>{plan_id}</code>\n"
+                    f"Neden: pending_reg verisi Redis'te bulunamadi (TTL expired veya temizlendi).\n"
+                    f"Aksiyon: Admin panelden kullanici bilgilerini kontrol edin."
+                )
                 return False
             
             reg_data = json.loads(reg_json)
@@ -90,7 +104,7 @@ class BillingService:
             created_user = await self.repo.create(new_user)
             if created_user:
                 logger.info("Yeni kullanici odeme sonrasi olusturuldu: %s", created_user.email)
-                await self.redis.delete(f"pending_reg:{user_id}")
+                await redis.delete(f"pending_reg:{user_id}")
                 return True
             return False
 

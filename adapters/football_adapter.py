@@ -254,7 +254,7 @@ class FootballAdapter(SportAdapter):
         formats = ["%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"]
         for fmt in formats:
             try:
-                return datetime.strptime(date_str.strip(), fmt)
+                return datetime.strptime(date_str.strip(), fmt).replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
         return None

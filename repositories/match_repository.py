@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
 from core.logger import logger
+from core.config import settings
 from schemas.match import MatchEntity, MatchInDB, MatchStatus
 
 
@@ -46,8 +47,8 @@ class MatchRepository:
 
         # Saat bazlı filtreleme (Local saat üzerinden: UTC+3)
         if start_hour is not None and end_hour is not None:
-            # MongoDB veriyi UTC tutar. +3 saat (3 * 3600 * 1000 ms) ekleyip saati kontrol ediyoruz.
-            utc_offset_ms = 3 * 3600 * 1000
+            # MongoDB veriyi UTC tutar. Config'deki offset'i ekleyip saati kontrol ediyoruz.
+            utc_offset_ms = settings.UTC_OFFSET_HOURS * 3600 * 1000
             
             # 24:00 durumunu handle etmek için (20-24 aralığı gibi)
             query["$expr"] = {

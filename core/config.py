@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     PAYMENT_PROVIDER: str = "iyzico"
     REQUIRE_EMAIL_VERIFICATION: bool = True
+    UTC_OFFSET_HOURS: int = 3  # Kullanici lokasyonu: Turkiye (UTC+3)
 
     # Telegram Notifications (Faz 3 - Lightweight Alerting)
     TELEGRAM_BOT_TOKEN: str | None = None
