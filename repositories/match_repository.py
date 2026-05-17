@@ -45,16 +45,13 @@ class MatchRepository:
         if league_key:
             query["league_key"] = league_key
 
-        # Saat bazlı filtreleme (Local saat üzerinden: UTC+3)
+        # Saat bazlı filtreleme (Direkt DB saatine göre)
         if start_hour is not None and end_hour is not None:
-            # MongoDB veriyi UTC tutar. Config'deki offset'i ekleyip saati kontrol ediyoruz.
-            utc_offset_ms = settings.UTC_OFFSET_HOURS * 3600 * 1000
-            
             # 24:00 durumunu handle etmek için (20-24 aralığı gibi)
             query["$expr"] = {
                 "$and": [
-                    {"$gte": [{"$hour": {"$add": ["$commence_time", utc_offset_ms]}}, start_hour]},
-                    {"$lt": [{"$hour": {"$add": ["$commence_time", utc_offset_ms]}}, end_hour]}
+                    {"$gte": [{"$hour": "$commence_time"}, start_hour]},
+                    {"$lt": [{"$hour": "$commence_time"}, end_hour]}
                 ]
             }
 

@@ -28,6 +28,7 @@ clients/
   email_client.py
   football_data_client.py
   odds_api_client.py
+  telegram_client.py
   __init__.py
 core/
   config.py
@@ -61,6 +62,8 @@ frontend/
           page.tsx
       confirm-email-change/
         page.tsx
+      dashboard/
+        page.tsx
       login/
         page.tsx
       pricing/
@@ -68,6 +71,8 @@ frontend/
       profile/
         page.tsx
       register/
+        page.tsx
+      terms/
         page.tsx
     components/
       ClientLayout.tsx
@@ -411,7 +416,7 @@ from utils.exceptions import (
     validation_exception_handler,
 )
 
-from core.logger import logger
+from core.logger import logger, shutdown_logging
 
 # setup_logging() is already called on import in core.logger
 
@@ -434,6 +439,7 @@ async def lifespan(app: FastAPI):
     logger.info("Redis baglantisi kapatildi.")
     await mongo.close()
     logger.info("MongoDB baglantisi kapatildi.")
+    shutdown_logging()
 
 
 app = FastAPI(
@@ -856,7 +862,7 @@ class SportAdapter(ABC):
         ...
 
     @abstractmethod
-    def normalize_historical(self, raw_rows: list[dict]) -> list[MatchEntity]:
+    def normalize_historical(self, raw_rows: list[dict], league_code: str = "") -> list[MatchEntity]:
         """CSV / tarihsel ham veriyi MatchEntity listesine donusturur.
 
         Args:
@@ -1125,7 +1131,7 @@ class FootballAdapter(SportAdapter):
         formats = ["%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d"]
         for fmt in formats:
             try:
-                return datetime.strptime(date_str.strip(), fmt)
+                return datetime.strptime(date_str.strip(), fmt).replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
         return None
@@ -1895,6 +1901,57 @@ class OddsAPIClient(BaseAPIClient):
         return response.json()
 
 
+--- DOSYA: clients\telegram_client.py ---
+"""Telegram bildirim istemcisi — Kritik sistem olaylarinda admin uyarisi gonderir."""
+
+import logging
+from clients.base_client import BaseAPIClient
+from core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramClient(BaseAPIClient):
+    """Telegram Bot API uzerinden bildirim gonderir."""
+
+    def __init__(self):
+        token = settings.TELEGRAM_BOT_TOKEN or ""
+        super().__init__(
+            base_url=f"https://api.telegram.org/bot{token}",
+            timeout=10.0,
+            max_retries=2,
+        )
+        self.chat_id = settings.TELEGRAM_CHAT_ID
+        self.enabled = bool(settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID)
+
+    def _build_headers(self) -> dict[str, str]:
+        return {"Content-Type": "application/json"}
+
+    async def send_alert(self, message: str) -> bool:
+        """Telegram'a uyari mesaji gonderir. Hata durumunda sessizce False doner."""
+        if not self.enabled:
+            logger.warning("Telegram bildirimi atlanamadi: BOT_TOKEN veya CHAT_ID yapilandirilmamis.")
+            return False
+        try:
+            response = await self._request(
+                "POST",
+                "/sendMessage",
+                json={
+                    "chat_id": self.chat_id,
+                    "text": f"⚠️ SPORTS-ANALYZER ALERT\n\n{message}",
+                    "parse_mode": "HTML",
+                },
+            )
+            return response.status_code == 200
+        except Exception as e:
+            logger.error("Telegram bildirim hatasi: %s", str(e))
+            return False
+
+
+# Singleton instance
+telegram_client = TelegramClient()
+
+
 --- DOSYA: clients\__init__.py ---
 # clients package
 
@@ -1943,6 +2000,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     PAYMENT_PROVIDER: str = "iyzico"
     REQUIRE_EMAIL_VERIFICATION: bool = True
+    UTC_OFFSET_HOURS: int = 3  # Kullanici lokasyonu: Turkiye (UTC+3)
 
     # Telegram Notifications (Faz 3 - Lightweight Alerting)
     TELEGRAM_BOT_TOKEN: str | None = None
@@ -2152,13 +2210,13 @@ mongo = MongoManager()
 import logging
 import orjson
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         log_record = {
-            "timestamp": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
             "message": record.getMessage(),
             "module": record.module,
@@ -2177,9 +2235,12 @@ class JsonFormatter(logging.Formatter):
 import logging.handlers
 import queue
 
+_listener = None  # Module-level reference for shutdown
+
 
 def setup_logging():
     """Configures the root logger for JSON output with a non-blocking QueueHandler."""
+    global _listener
     # 1. Base Handler (stdout)
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(JsonFormatter())
@@ -2191,12 +2252,21 @@ def setup_logging():
     # 3. Listener to process logs in background
     listener = logging.handlers.QueueListener(log_queue, stream_handler)
     listener.start()
+    _listener = listener
 
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logger.handlers = [queue_handler]
 
     return logger
+
+
+def shutdown_logging():
+    """QueueListener'i guvenli sekilde durdurur. Uygulama shutdown'inda cagrilir."""
+    global _listener
+    if _listener:
+        _listener.stop()
+        _listener = None
 
 
 # Singleton logger instance
@@ -2612,7 +2682,315 @@ export default function RootLayout({
 --- DOSYA: frontend\src\app\page.tsx ---
 "use client";
 
+import Link from "next/link";
+import { ArrowRightIcon, ChartBarIcon, ServerStackIcon, TrophyIcon, BoltIcon } from "@heroicons/react/24/outline";
+
+export default function LandingPage() {
+  return (
+    <div className="min-h-screen bg-[#050505] text-white flex flex-col relative overflow-hidden font-sans">
+
+      {/* BACKGROUND EFFECTS */}
+      <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-primary/20 blur-[150px] rounded-full pointer-events-none" />
+      <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-primary/10 blur-[150px] rounded-full pointer-events-none" />
+      <div className="absolute inset-0 bg-[url('/grid.svg')] bg-center opacity-10 pointer-events-none" />
+
+      {/* HEADER */}
+      <header className="relative z-10 flex items-center justify-between px-8 py-6 max-w-7xl mx-auto w-full">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-primary flex items-center justify-center shadow-[0_0_20px_rgba(16,185,129,0.4)]">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z" /></svg>
+          </div>
+          <span className="text-2xl font-black tracking-tighter text-white uppercase italic">Sports-Analyzer</span>
+        </div>
+        <div className="flex items-center gap-6">
+          <Link href="/login" className="text-sm font-semibold text-slate-300 hover:text-white transition-colors">
+            Giriş Yap
+          </Link>
+          <Link href="/register" className="text-sm font-bold bg-white text-black px-5 py-2.5 rounded-full hover:bg-slate-200 hover:scale-105 transition-all shadow-[0_0_15px_rgba(255,255,255,0.2)]">
+            Hemen Başla
+          </Link>
+        </div>
+      </header>
+
+      {/* HERO SECTION */}
+      <main className="flex-1 flex flex-col items-center justify-center text-center px-4 relative z-10 py-20 mt-10">
+        <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-primary/10 border border-primary/20 text-primary text-xs font-bold mb-8 uppercase tracking-widest animate-pulse">
+          <BoltIcon className="w-4 h-4" />
+          Profesyonel Bahis Analizi Artık Seninle
+        </div>
+
+        <h1 className="text-5xl md:text-7xl font-black tracking-tighter mb-8 leading-tight max-w-4xl">
+          SEZGİLERİNİ BIRAK, <br />
+          <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-emerald-400">MATEMATİĞE GÜVEN.</span>
+        </h1>
+
+        <p className="text-lg md:text-xl text-slate-400 max-w-2xl mb-12 font-medium">
+          Duygusal bahisleri kenara bırakın. Gelişmiş veri algoritmalarımız geçmiş maçların dinamiklerini hesaplayarak sıradan bahisçilerin göremediği fırsatları ortaya çıkarır.
+        </p>
+
+        <div className="flex flex-col sm:flex-row items-center gap-4">
+          <Link href="/register" className="flex items-center gap-2 bg-primary text-black px-8 py-4 rounded-full font-black text-lg hover:scale-105 transition-all shadow-[0_0_30px_rgba(16,185,129,0.4)]">
+            Sisteme Katıl <ArrowRightIcon className="w-5 h-5 stroke-[3]" />
+          </Link>
+          <Link href="/pricing" className="px-8 py-4 rounded-full font-bold text-white bg-white/5 border border-white/10 hover:bg-white/10 transition-colors">
+            Planları İncele
+          </Link>
+        </div>
+      </main>
+
+      {/* HOW IT WORKS SECTION */}
+      <section className="relative z-10 max-w-7xl mx-auto w-full px-8 py-24">
+        <div className="text-center mb-16">
+          <h2 className="text-3xl md:text-5xl font-black tracking-tight mb-4">SİSTEM NASIL ÇALIŞIR?</h2>
+          <p className="text-slate-400">İleri düzey veri işleme altyapısıyla hata payını en aza indirin.</p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+          {/* Feature 1 */}
+          <div className="bg-white/[0.03] border border-white/10 rounded-3xl p-8 backdrop-blur-md hover:bg-white/[0.05] hover:-translate-y-2 transition-all duration-300">
+            <div className="w-14 h-14 bg-blue-500/10 border border-blue-500/20 rounded-2xl flex items-center justify-center mb-6">
+              <ServerStackIcon className="w-7 h-7 text-blue-400" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Derin Veri Toplama</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Dünya genelindeki tüm liglerden anlık oran verileri, takım form durumları ve tarihsel eşleşmeler milisaniyeler içinde toplanır.
+            </p>
+          </div>
+
+          {/* Feature 2 */}
+          <div className="bg-white/[0.03] border border-white/10 rounded-3xl p-8 backdrop-blur-md hover:bg-white/[0.05] hover:-translate-y-2 transition-all duration-300">
+            <div className="w-14 h-14 bg-primary/10 border border-primary/20 rounded-2xl flex items-center justify-center mb-6">
+              <ChartBarIcon className="w-7 h-7 text-primary" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Matematiksel Filtreleme</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Geliştirdiğimiz özel algoritmalar, binlerce geçmiş maçı matematiksel mesafe formülleriyle analiz ederek en yüksek benzerlikteki şablonları bulur.
+            </p>
+          </div>
+
+          {/* Feature 3 */}
+          <div className="bg-white/[0.03] border border-white/10 rounded-3xl p-8 backdrop-blur-md hover:bg-white/[0.05] hover:-translate-y-2 transition-all duration-300">
+            <div className="w-14 h-14 bg-yellow-500/10 border border-yellow-500/20 rounded-2xl flex items-center justify-center mb-6">
+              <TrophyIcon className="w-7 h-7 text-yellow-400" />
+            </div>
+            <h3 className="text-xl font-bold mb-3">Kazandıran Strateji</h3>
+            <p className="text-sm text-slate-400 leading-relaxed">
+              Duygusal yanılmalardan arınmış, tamamen geçmiş verilere ve istatistiksel trendlere dayanan net analizlerle daima bir adım önde olun.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* FINAL CTA */}
+      <section className="relative z-10 py-24 px-8 mt-12 bg-gradient-to-b from-transparent to-primary/10">
+        <div className="max-w-4xl mx-auto text-center">
+          <h2 className="text-4xl md:text-6xl font-black tracking-tight mb-8">
+            KAZANANLAR KULÜBÜNE <br /> ADIM ATIN.
+          </h2>
+          <p className="text-xl text-slate-300 mb-10 max-w-2xl mx-auto">
+            Sıradan oyuncular tahminde bulunur. Profesyoneller analiz eder. Analiz altyapımızın gücünü arkanıza alarak fark yaratın.
+          </p>
+          <Link href="/register" className="inline-flex items-center justify-center w-full sm:w-auto bg-white text-black px-12 py-5 rounded-full font-black text-xl hover:bg-slate-200 hover:scale-105 transition-all shadow-[0_0_40px_rgba(255,255,255,0.3)]">
+            HEMEN HESAP OLUŞTUR
+          </Link>
+        </div>
+      </section>
+
+      {/* LEGAL DISCLAIMER */}
+      <section className="relative z-10 py-12 px-8 bg-gradient-to-b from-primary/10 to-transparent">
+        <div className="max-w-7xl mx-auto text-center">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-[10px] font-black uppercase tracking-widest mb-4">
+            Yasal Uyarı
+          </div>
+          <p className="text-xs text-slate-500 max-w-4xl mx-auto leading-relaxed">
+            Sports-Analyzer platformu, yalnızca geçmiş maç verileri ve matematiksel hesaplamalara dayalı istatistiksel sonuçlar sunar. <strong>Sistemimizde yer alan hiçbir veri, analiz veya tahmin kesinlikle bahis tavsiyesi, yönlendirme veya teşvik niteliği taşımaz.</strong> Platformumuz hiçbir şekilde bahis oynatmaz, yasadışı bahis faaliyetlerini desteklemez ve teşvik etmez. Sunulan verilerin kullanımından doğabilecek her türlü maddi/manevi zarar ve yasal sorumluluk tamamen kullanıcının kendisine aittir. Kullanıcılar bulundukları ülkenin yasalarına uymakla yükümlüdür.
+          </p>
+        </div>
+      </section>
+
+      {/* FOOTER */}
+      <footer className="relative z-10 border-t border-white/10 py-8 px-8 mt-auto">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded bg-primary flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z" /></svg>
+            </div>
+            <span className="text-sm font-bold text-white uppercase italic">Sports-Analyzer</span>
+          </div>
+          <p className="text-xs text-slate-500 font-medium">
+            © {new Date().getFullYear()} Sports Analyzer. Tüm hakları saklıdır.
+          </p>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+
+--- DOSYA: frontend\src\app\billing\success\page.tsx ---
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { CheckCircleIcon } from "@heroicons/react/24/outline";
+
+export default function PaymentSuccessPage() {
+  const [countdown, setCountdown] = useState(5);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdown((prev) => prev - 1);
+    }, 1000);
+
+    const redirect = setTimeout(() => {
+      window.location.href = "/";
+    }, 5000);
+
+    return () => {
+      clearInterval(timer);
+      clearTimeout(redirect);
+    };
+  }, []);
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-[70vh] text-center px-4">
+      <div className="bg-[#11111a] p-10 rounded-3xl border border-slate-800 shadow-2xl max-w-md w-full">
+        <CheckCircleIcon className="h-20 w-20 text-emerald-500 mx-auto mb-6 animate-bounce" />
+        <h1 className="text-3xl font-black text-white mb-4">Ödeme Başarılı!</h1>
+        <p className="text-slate-400 mb-8">
+          Aboneliğiniz başarıyla aktif edildi. Artık tüm premium özellikleri kullanabilirsiniz.
+        </p>
+        
+        <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl mb-8">
+          <p className="text-emerald-400 text-sm font-medium">
+            {countdown} saniye içinde ana sayfaya yönlendiriliyorsunuz...
+          </p>
+        </div>
+
+        <Link
+          href="/"
+          className="block w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-colors"
+        >
+          Hemen Analize Başla
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+
+--- DOSYA: frontend\src\app\confirm-email-change\page.tsx ---
+"use client";
+
+import { useEffect, useState, Suspense } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import Link from "next/link";
+import { API_URL } from "@/config/constants";
+
+function ConfirmEmailChangeContent() {
+  const searchParams = useSearchParams();
+  const token = searchParams.get("token");
+  const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
+  const [message, setMessage] = useState("Email adresiniz doğrulanıyor...");
+  const router = useRouter();
+
+  useEffect(() => {
+    if (!token) {
+      setStatus('error');
+      setMessage("Geçersiz veya eksik doğrulama linki.");
+      return;
+    }
+
+    const confirmChange = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/v1/auth/confirm-email-change?token=${token}`, {
+          credentials: "include"
+        });
+        const data = await res.json();
+        
+        if (res.ok) {
+          setStatus('success');
+          setMessage("Email adresiniz başarıyla güncellendi. Lütfen yeni e-posta adresinizle giriş yapın.");
+          // Clear cookies by calling logout (Faz 1)
+          await fetch(`${API_URL}/api/v1/auth/logout`, { method: "POST", credentials: "include" });
+          window.dispatchEvent(new Event('auth-change'));
+        } else {
+          setStatus('error');
+          setMessage(data.detail || "Email doğrulaması başarısız oldu.");
+        }
+      } catch (err) {
+        setStatus('error');
+        setMessage("Bir ağ hatası oluştu.");
+      }
+    };
+
+    confirmChange();
+  }, [token]);
+
+  return (
+    <div className="min-h-[80vh] flex items-center justify-center px-4">
+      <div className="glass max-w-md w-full p-10 rounded-[2.5rem] card-shadow border border-white/5 text-center">
+        {status === 'loading' && (
+          <div className="flex flex-col items-center gap-6">
+            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-primary"></div>
+            <p className="text-slate-400 font-bold text-xs uppercase tracking-widest">{message}</p>
+          </div>
+        )}
+
+        {status === 'success' && (
+          <div className="flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-500">
+            <div className="w-16 h-16 rounded-2xl bg-primary/20 flex items-center justify-center text-primary emerald-glow">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            </div>
+            <h1 className="text-2xl font-black text-white uppercase tracking-tight">Harika!</h1>
+            <p className="text-slate-400 text-sm font-medium leading-relaxed">{message}</p>
+            <Link 
+              href="/login"
+              className="mt-4 w-full py-4 bg-primary text-black font-black rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all emerald-glow uppercase text-xs tracking-widest"
+            >
+              Giriş Yap
+            </Link>
+          </div>
+        )}
+
+        {status === 'error' && (
+          <div className="flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-500">
+            <div className="w-16 h-16 rounded-2xl bg-red-500/20 flex items-center justify-center text-red-500">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </div>
+            <h1 className="text-2xl font-black text-white uppercase tracking-tight">Hata Oluştu</h1>
+            <p className="text-red-400/80 text-sm font-medium leading-relaxed">{message}</p>
+            <Link 
+              href="/"
+              className="mt-4 w-full py-4 bg-white/5 text-white font-black rounded-2xl hover:bg-white/10 transition-all uppercase text-xs tracking-widest"
+            >
+              Ana Sayfaya Dön
+            </Link>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function ConfirmEmailChangePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-[80vh] flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-primary"></div>
+      </div>
+    }>
+      <ConfirmEmailChangeContent />
+    </Suspense>
+  );
+}
+
+
+--- DOSYA: frontend\src\app\dashboard\page.tsx ---
+"use client";
+
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { MatchResponse, SimilarMatchResult } from "@/types";
 import Filters from "@/components/Filters";
 import UpcomingMatchesTable from "@/components/UpcomingMatchesTable";
@@ -2623,6 +3001,7 @@ import { useToast } from "@/components/Toast";
 import { API_URL } from "@/config/constants";
 
 export default function Home() {
+  const router = useRouter();
   const { showToast } = useToast();
   const [matches, setMatches] = useState<MatchResponse[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2661,7 +3040,12 @@ export default function Home() {
         
         url += params.toString();
 
-        const response = await fetch(url);
+        const response = await fetch(url, { credentials: "include" });
+        // ÖNEMLİ-5 Fix: Token expire olduğunda login'e yönlendir
+        if (response.status === 401) {
+          router.push("/login");
+          return;
+        }
         if (!response.ok) throw new Error("Backend unreachable");
 
         const json = await response.json();
@@ -2998,165 +3382,6 @@ export default function Home() {
   );
 }
 
---- DOSYA: frontend\src\app\billing\success\page.tsx ---
-"use client";
-
-import { useEffect, useState } from "react";
-import Link from "next/link";
-import { CheckCircleIcon } from "@heroicons/react/24/outline";
-
-export default function PaymentSuccessPage() {
-  const [countdown, setCountdown] = useState(5);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setCountdown((prev) => prev - 1);
-    }, 1000);
-
-    const redirect = setTimeout(() => {
-      window.location.href = "/";
-    }, 5000);
-
-    return () => {
-      clearInterval(timer);
-      clearTimeout(redirect);
-    };
-  }, []);
-
-  return (
-    <div className="flex flex-col items-center justify-center min-h-[70vh] text-center px-4">
-      <div className="bg-[#11111a] p-10 rounded-3xl border border-slate-800 shadow-2xl max-w-md w-full">
-        <CheckCircleIcon className="h-20 w-20 text-emerald-500 mx-auto mb-6 animate-bounce" />
-        <h1 className="text-3xl font-black text-white mb-4">Ödeme Başarılı!</h1>
-        <p className="text-slate-400 mb-8">
-          Aboneliğiniz başarıyla aktif edildi. Artık tüm premium özellikleri kullanabilirsiniz.
-        </p>
-        
-        <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl mb-8">
-          <p className="text-emerald-400 text-sm font-medium">
-            {countdown} saniye içinde ana sayfaya yönlendiriliyorsunuz...
-          </p>
-        </div>
-
-        <Link
-          href="/"
-          className="block w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-colors"
-        >
-          Hemen Analize Başla
-        </Link>
-      </div>
-    </div>
-  );
-}
-
-
---- DOSYA: frontend\src\app\confirm-email-change\page.tsx ---
-"use client";
-
-import { useEffect, useState, Suspense } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
-import Link from "next/link";
-import { API_URL } from "@/config/constants";
-
-function ConfirmEmailChangeContent() {
-  const searchParams = useSearchParams();
-  const token = searchParams.get("token");
-  const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [message, setMessage] = useState("Email adresiniz doğrulanıyor...");
-  const router = useRouter();
-
-  useEffect(() => {
-    if (!token) {
-      setStatus('error');
-      setMessage("Geçersiz veya eksik doğrulama linki.");
-      return;
-    }
-
-    const confirmChange = async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/v1/auth/confirm-email-change?token=${token}`, {
-          credentials: "include"
-        });
-        const data = await res.json();
-        
-        if (res.ok) {
-          setStatus('success');
-          setMessage("Email adresiniz başarıyla güncellendi. Lütfen yeni e-posta adresinizle giriş yapın.");
-          // Clear cookies by calling logout (Faz 1)
-          await fetch(`${API_URL}/api/v1/auth/logout`, { method: "POST", credentials: "include" });
-          window.dispatchEvent(new Event('auth-change'));
-        } else {
-          setStatus('error');
-          setMessage(data.detail || "Email doğrulaması başarısız oldu.");
-        }
-      } catch (err) {
-        setStatus('error');
-        setMessage("Bir ağ hatası oluştu.");
-      }
-    };
-
-    confirmChange();
-  }, [token]);
-
-  return (
-    <div className="min-h-[80vh] flex items-center justify-center px-4">
-      <div className="glass max-w-md w-full p-10 rounded-[2.5rem] card-shadow border border-white/5 text-center">
-        {status === 'loading' && (
-          <div className="flex flex-col items-center gap-6">
-            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-primary"></div>
-            <p className="text-slate-400 font-bold text-xs uppercase tracking-widest">{message}</p>
-          </div>
-        )}
-
-        {status === 'success' && (
-          <div className="flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-500">
-            <div className="w-16 h-16 rounded-2xl bg-primary/20 flex items-center justify-center text-primary emerald-glow">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
-            </div>
-            <h1 className="text-2xl font-black text-white uppercase tracking-tight">Harika!</h1>
-            <p className="text-slate-400 text-sm font-medium leading-relaxed">{message}</p>
-            <Link 
-              href="/login"
-              className="mt-4 w-full py-4 bg-primary text-black font-black rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all emerald-glow uppercase text-xs tracking-widest"
-            >
-              Giriş Yap
-            </Link>
-          </div>
-        )}
-
-        {status === 'error' && (
-          <div className="flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-500">
-            <div className="w-16 h-16 rounded-2xl bg-red-500/20 flex items-center justify-center text-red-500">
-              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-            </div>
-            <h1 className="text-2xl font-black text-white uppercase tracking-tight">Hata Oluştu</h1>
-            <p className="text-red-400/80 text-sm font-medium leading-relaxed">{message}</p>
-            <Link 
-              href="/"
-              className="mt-4 w-full py-4 bg-white/5 text-white font-black rounded-2xl hover:bg-white/10 transition-all uppercase text-xs tracking-widest"
-            >
-              Ana Sayfaya Dön
-            </Link>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export default function ConfirmEmailChangePage() {
-  return (
-    <Suspense fallback={
-      <div className="min-h-[80vh] flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-primary"></div>
-      </div>
-    }>
-      <ConfirmEmailChangeContent />
-    </Suspense>
-  );
-}
-
-
 --- DOSYA: frontend\src\app\login\page.tsx ---
 "use client";
 
@@ -3186,7 +3411,7 @@ export default function Login() {
       const data = await response.json();
       if (response.ok) {
         window.dispatchEvent(new Event('auth-change'));
-        router.push("/");
+        router.push("/dashboard");
       } else {
         const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
         setError(typeof errMsg === "string" ? errMsg : "Giriş yapılamadı. Bilgilerinizi kontrol edin.");
@@ -3305,43 +3530,11 @@ export default function PricingPage() {
     fetchPlans();
   }, []);
 
-  const handleCheckout = async (planId: string) => {
+  const handleCheckout = (planId: string) => {
     setProcessingId(planId);
-    try {
-      // Auth check via cookies (Faz 1)
-      const authRes = await fetch(`${API_URL}/api/v1/auth/me`, {
-        credentials: "include"
-      });
-      
-      if (!authRes.ok) {
-        // Redirect to register with plan_id using Next.js router for better UX
-        router.push(`/register?plan=${planId}`);
-        return;
-      }
-
-      const res = await fetch(`${API_URL}/api/v1/billing/checkout`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({ plan_id: planId }),
-      });
-
-      const data = await res.json();
-      if (res.ok && data.checkout_url) {
-        // Iyzico checkout is an external URL, so window.location is correct here
-        window.location.href = data.checkout_url;
-      } else {
-        const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
-        alert(typeof errMsg === "string" ? errMsg : "Ödeme oturumu oluşturulamadı.");
-      }
-    } catch (err) {
-      console.error("Checkout error:", err);
-      alert("Bir hata oluştu.");
-    } finally {
-      setProcessingId(null);
-    }
+    // Her zaman kayit/onay sayfasina yonlendir
+    router.push(`/register?plan=${planId}`);
+    setProcessingId(null);
   };
 
   if (loading) {
@@ -3705,8 +3898,81 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { API_URL } from "@/config/constants";
 
+// ── Kullanıcı Sözleşmesi Modal ──────────────────────────────────────────────
+function TermsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/80 backdrop-blur-sm" onClick={onClose} />
+
+      <div className="relative w-full max-w-2xl max-h-[80vh] glass rounded-3xl border border-white/10 card-shadow overflow-hidden flex flex-col">
+        <div className="flex items-center justify-between p-6 border-b border-white/10">
+          <h2 className="text-xl font-black text-primary uppercase tracking-tighter">Kullanıcı Sözleşmesi ve Yasal Uyarı</h2>
+          <button onClick={onClose} className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+
+        <div className="overflow-y-auto p-6 space-y-6 text-slate-300 text-sm leading-relaxed">
+          <section>
+            <h3 className="text-lg font-bold mb-2 text-white">1. Taraflar ve Konu</h3>
+            <p>
+              Bu sözleşme, Sports-Analyzer platformuna (bundan sonra &quot;Platform&quot; veya &quot;Sistem&quot; olarak anılacaktır) üye olan kullanıcılar (bundan sonra &quot;Kullanıcı&quot; olarak anılacaktır) arasında akdedilmiştir. Konusu, Platformun sunduğu istatistiksel veri analiz hizmetlerinin kullanım şartlarının belirlenmesidir.
+            </p>
+          </section>
+
+          <section>
+            <h3 className="text-lg font-bold mb-2 text-white">2. Hizmetin Niteliği ve Sorumluluk Reddi (ÖNEMLİ)</h3>
+            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl mb-3">
+              <p className="text-red-400 font-bold mb-1">Sports-Analyzer kesinlikle bir bahis sitesi değildir ve bahis oynamaya teşvik etmez.</p>
+              <p className="text-xs text-red-400/80">Platformumuz, yalnızca geçmiş maç verileri, takım istatistikleri ve matematiksel mesafe hesaplamalarına dayanan sonuçlar sunan bir veri aracıdır.</p>
+            </div>
+            <ul className="list-disc pl-5 mt-2 space-y-2">
+              <li>Sistemde yer alan hiçbir oran, tahmin, analiz veya veri <strong>bahis tavsiyesi veya finansal danışmanlık niteliği taşımaz.</strong></li>
+              <li>Platformumuz üzerinden bahis oynanması mümkün değildir ve hiçbir yasadışı bahis faaliyetine aracılık edilmez.</li>
+              <li>Sistemdeki verilere dayanılarak alınan her türlü karar ve doğabilecek maddi veya manevi zararlar tamamen <strong>Kullanıcının kendi sorumluluğundadır.</strong> Sistemimiz doğabilecek hiçbir mali kayıptan sorumlu tutulamaz.</li>
+              <li>Sports-Analyzer, sunulan verilerin doğruluğunu, güncelliğini veya başarılı sonuç vereceğini garanti etmez ve hiçbir sorumluluk kabul etmez.</li>
+            </ul>
+          </section>
+
+          <section>
+            <h3 className="text-lg font-bold mb-2 text-white">3. Yasal Uyumluluk</h3>
+            <p>
+              Kullanıcılar, Platformu kullanırken bulundukları ülkenin yasalarına tam ve eksiksiz olarak uymakla yükümlüdür. Yasadışı bahis ve kumar oynamak Türkiye Cumhuriyeti kanunlarına göre suçtur. Sports-Analyzer, yasadışı faaliyetlerde bulunan kullanıcıların hesaplarını bildirim yapmaksızın kapatma hakkını saklı tutar ve yetkili mercilerle bilgi paylaşımında bulunabilir.
+            </p>
+          </section>
+
+          <section>
+            <h3 className="text-lg font-bold mb-2 text-white">4. Hizmet Bedeli ve İptal Şartları</h3>
+            <p>
+              Kullanıcılar, seçtikleri abonelik planına göre belirlenen ücreti ödemekle yükümlüdür. Sunulan hizmet tamamen dijital veri analizine dayandığından ve anında ifa edildiğinden, iade ve iptal koşulları Mesafeli Sözleşmeler Yönetmeliği&apos;ne (Cayma Hakkı İstisnaları) tabidir.
+            </p>
+          </section>
+
+          <section>
+            <h3 className="text-lg font-bold mb-2 text-white">5. Veri ve Fikri Mülkiyet</h3>
+            <p>
+              Sistemdeki analiz metodolojisi, kodlar ve görsel tasarımlar Sports-Analyzer&apos;a aittir. Kullanıcılar, verileri yalnızca bireysel kullanım amacıyla inceleyebilir; bunları satamaz, kopyalayamaz, bot/script ile çekemez veya ticari amaçla dağıtamaz.
+            </p>
+          </section>
+        </div>
+
+        <div className="p-6 border-t border-white/10">
+          <button onClick={onClose} className="w-full bg-primary text-black font-black py-3 rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all uppercase text-xs tracking-widest">
+            Anladım, Kapat
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Kayıt Formu ─────────────────────────────────────────────────────────────
 function RegisterContent() {
   const [formData, setFormData] = useState({ display_name: "", email: "", password: "" });
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [showTermsModal, setShowTermsModal] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
@@ -3715,7 +3981,6 @@ function RegisterContent() {
 
   useEffect(() => {
     if (!planId) {
-      // Use replace instead of push to avoid "Back Button Trap"
       router.replace("/pricing");
     }
   }, [planId, router]);
@@ -3725,7 +3990,6 @@ function RegisterContent() {
     setError("");
     setLoading(true);
     try {
-      // Guest Checkout: Kayıt ve Ödeme birlikte
       const response = await fetch(`${API_URL}/api/v1/billing/guest-checkout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3737,7 +4001,6 @@ function RegisterContent() {
 
       const data = await response.json();
       if (response.ok && data.checkout_url) {
-        // Iyzico ödeme sayfasına yönlendir
         window.location.href = data.checkout_url;
       } else {
         const errMsg = Array.isArray(data.detail) ? data.detail.map((e: any) => e.msg).join(", ") : data.detail;
@@ -3806,7 +4069,22 @@ function RegisterContent() {
               onChange={(e) => setFormData({ ...formData, password: e.target.value })}
             />
           </div>
-          <button type="submit" disabled={loading} className="w-full bg-primary text-black font-black py-4 rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all mt-4 emerald-glow uppercase text-xs tracking-widest disabled:opacity-50">
+
+          {/* Kullanıcı Sözleşmesi Onayı */}
+          <div className="flex items-start gap-3 mt-4">
+            <input
+              type="checkbox"
+              id="terms"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+              className="mt-1 w-4 h-4 rounded border-white/10 bg-white/5 text-primary focus:ring-primary focus:ring-offset-0 transition-colors cursor-pointer"
+            />
+            <label htmlFor="terms" className="text-[10px] text-slate-400 leading-relaxed cursor-pointer">
+              <button type="button" onClick={() => setShowTermsModal(true)} className="text-primary hover:underline font-bold">Kullanıcı Sözleşmesi</button> ve Aydınlatma Metni&apos;ni okudum, anladım ve kabul ediyorum. Platformun kesinlikle bahis tavsiyesi vermediğini, yalnızca istatistiksel veri sunduğunu onaylıyorum.
+            </label>
+          </div>
+
+          <button type="submit" disabled={loading || !acceptedTerms} className="w-full bg-primary text-black font-black py-4 rounded-2xl hover:scale-[1.02] active:scale-[0.98] transition-all mt-4 emerald-glow uppercase text-xs tracking-widest disabled:opacity-50">
             {loading ? "İşleniyor..." : "Ödemeye Geç"}
           </button>
         </form>
@@ -3824,6 +4102,8 @@ function RegisterContent() {
           </div>
         </div>
       </div>
+
+      <TermsModal isOpen={showTermsModal} onClose={() => setShowTermsModal(false)} />
     </div>
   );
 }
@@ -3837,11 +4117,77 @@ export default function Register() {
 }
 
 
+--- DOSYA: frontend\src\app\terms\page.tsx ---
+"use client";
+
+import Link from "next/link";
+
+export default function TermsPage() {
+  return (
+    <div className="min-h-screen bg-[#050505] text-white py-20 px-8">
+      <div className="max-w-4xl mx-auto glass p-10 rounded-3xl border border-white/10 card-shadow">
+        <h1 className="text-3xl font-black mb-8 text-primary uppercase tracking-tighter">Kullanıcı Sözleşmesi ve Yasal Uyarı</h1>
+        
+        <div className="space-y-6 text-slate-300 text-sm leading-relaxed">
+          <section>
+            <h2 className="text-xl font-bold mb-3 text-white">1. Taraflar ve Konu</h2>
+            <p>
+              Bu sözleşme, Sports-Analyzer platformuna (bundan sonra "Platform" veya "Sistem" olarak anılacaktır) üye olan kullanıcılar (bundan sonra "Kullanıcı" olarak anılacaktır) arasında akdedilmiştir. Konusu, Platformun sunduğu istatistiksel veri analiz hizmetlerinin kullanım şartlarının belirlenmesidir.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-bold mb-3 text-white">2. Hizmetin Niteliği ve Sorumluluk Reddi (ÖNEMLİ)</h2>
+            <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl mb-4">
+              <p className="text-red-400 font-bold mb-2">Sports-Analyzer kesinlikle bir bahis sitesi değildir ve bahis oynamaya teşvik etmez.</p>
+              <p className="text-xs text-red-400/80">Platformumuz, yalnızca geçmiş maç verileri, takım istatistikleri ve matematiksel mesafe hesaplamalarına dayanan sonuçlar sunan bir veri aracıdır.</p>
+            </div>
+            <ul className="list-disc pl-5 mt-2 space-y-2">
+              <li>Sistemde yer alan hiçbir oran, tahmin, analiz veya veri <strong>bahis tavsiyesi veya finansal danışmanlık niteliği taşımaz.</strong></li>
+              <li>Platformumuz üzerinden bahis oynanması mümkün değildir ve hiçbir yasadışı bahis faaliyetine aracılık edilmez.</li>
+              <li>Sistemdeki verilere dayanılarak alınan her türlü karar ve doğabilecek maddi veya manevi zararlar tamamen <strong>Kullanıcının kendi sorumluluğundadır.</strong> Sistemimiz doğabilecek hiçbir mali kayıptan sorumlu tutulamaz.</li>
+              <li>Sports-Analyzer, sunulan verilerin doğruluğunu, güncelliğini veya başarılı sonuç vereceğini garanti etmez ve hiçbir sorumluluk kabul etmez.</li>
+            </ul>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-bold mb-3 text-white">3. Yasal Uyumluluk</h2>
+            <p>
+              Kullanıcılar, Platformu kullanırken bulundukları ülkenin yasalarına tam ve eksiksiz olarak uymakla yükümlüdür. Yasadışı bahis ve kumar oynamak Türkiye Cumhuriyeti kanunlarına göre suçtur. Sports-Analyzer, yasadışı faaliyetlerde bulunan kullanıcıların hesaplarını bildirim yapmaksızın kapatma hakkını saklı tutar ve yetkili mercilerle bilgi paylaşımında bulunabilir.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-bold mb-3 text-white">4. Hizmet Bedeli ve İptal Şartları</h2>
+            <p>
+              Kullanıcılar, seçtikleri abonelik planına göre belirlenen ücreti ödemekle yükümlüdür. Sunulan hizmet tamamen dijital veri analizine dayandığından ve anında ifa edildiğinden, iade ve iptal koşulları Mesafeli Sözleşmeler Yönetmeliği'ne (Cayma Hakkı İstisnaları) tabidir.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-bold mb-3 text-white">5. Veri ve Fikri Mülkiyet</h2>
+            <p>
+              Sistemdeki analiz metodolojisi, kodlar ve görsel tasarımlar Sports-Analyzer'a aittir. Kullanıcılar, verileri yalnızca bireysel kullanım amacıyla inceleyebilir; bunları satamaz, kopyalayamaz, bot/script ile çekemez veya ticari amaçla dağıtamaz.
+            </p>
+          </section>
+        </div>
+
+        <div className="mt-12 pt-6 border-t border-white/10 text-center">
+          <button onClick={() => window.close()} className="inline-block px-6 py-3 bg-primary text-black font-black text-xs uppercase tracking-widest rounded-xl hover:scale-105 transition-all cursor-pointer">
+            Anladım, Kapat
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 --- DOSYA: frontend\src\components\ClientLayout.tsx ---
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import TopHeader from "@/components/TopHeader";
 import { ToastProvider } from "@/components/Toast";
@@ -3851,13 +4197,13 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
   const pathname = usePathname();
   const router = useRouter();
   const [isAuthChecking, setIsAuthChecking] = useState(true);
-  const authChecked = useRef(false);
 
-  const publicRoutes = ["/login", "/register", "/pricing", "/confirm-email-change", "/billing/success"];
+  const publicRoutes = ["/", "/login", "/register", "/pricing", "/confirm-email-change", "/billing/success"];
   const isPublicPage = publicRoutes.includes(pathname);
 
   useEffect(() => {
     const checkAuth = async () => {
+      setIsAuthChecking(true);
       if (isPublicPage) {
         setIsAuthChecking(false);
         return;
@@ -3876,11 +4222,9 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         router.push("/login");
       }
     };
-    
-    if (authChecked.current) return;
-    authChecked.current = true;
+
     checkAuth();
-  }, [isPublicPage, router]);
+  }, [pathname, isPublicPage, router]);
 
   if (isAuthChecking && !isPublicPage) {
     return (
@@ -4208,7 +4552,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 
 const NAV_ITEMS = [
-  { name: "Analizler", href: "/", icon: (props: any) => (
+  { name: "Analizler", href: "/dashboard", icon: (props: any) => (
     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
   )},
   { name: "Planlar", href: "/pricing", icon: (props: any) => (
@@ -4232,12 +4576,12 @@ export default function Sidebar() {
   return (
     <aside className="w-64 h-screen fixed left-0 top-0 bg-[#050505] border-r border-white/5 flex flex-col z-50">
       {/* LOGO */}
-      <div className="p-6 flex items-center gap-3">
-        <div className="w-8 h-8 rounded bg-primary flex items-center justify-center emerald-glow">
-           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z"/></svg>
-        </div>
-        <span className="text-xl font-black tracking-tighter text-white uppercase italic">Sports-Analyzer</span>
-      </div>
+        <Link href="/dashboard" className="p-6 flex items-center gap-3">
+          <div className="w-8 h-8 rounded bg-primary flex items-center justify-center emerald-glow">
+             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z"/></svg>
+          </div>
+          <span className="text-xl font-black tracking-tighter text-white uppercase italic">Sports-Analyzer</span>
+        </Link>
 
       {/* MAIN NAV */}
       <nav className="flex-1 px-4 mt-4 space-y-1">
@@ -5154,6 +5498,7 @@ from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import UpdateOne
 from core.logger import logger
+from core.config import settings
 from schemas.match import MatchEntity, MatchInDB, MatchStatus
 
 
@@ -5191,8 +5536,8 @@ class MatchRepository:
 
         # Saat bazlı filtreleme (Local saat üzerinden: UTC+3)
         if start_hour is not None and end_hour is not None:
-            # MongoDB veriyi UTC tutar. +3 saat (3 * 3600 * 1000 ms) ekleyip saati kontrol ediyoruz.
-            utc_offset_ms = 3 * 3600 * 1000
+            # MongoDB veriyi UTC tutar. Config'deki offset'i ekleyip saati kontrol ediyoruz.
+            utc_offset_ms = settings.UTC_OFFSET_HOURS * 3600 * 1000
             
             # 24:00 durumunu handle etmek için (20-24 aralığı gibi)
             query["$expr"] = {
@@ -5556,6 +5901,20 @@ from utils.dependencies import get_auth_service, get_current_active_user
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
 
+# ── Cookie helper ─────────────────────────────────────────────────────────────
+
+
+def _get_cookie_delete_params() -> dict:
+    """Cookie silme parametreleri — set ile ayni path/flag'leri kullanir."""
+    is_prod = settings.ENVIRONMENT == "production"
+    return {
+        "path": "/",
+        "httponly": True,
+        "secure": is_prod,
+        "samesite": "lax",
+    }
+
+
 # ── Register ──────────────────────────────────────────────────────────────────
 
 
@@ -5737,13 +6096,7 @@ async def logout(
     if refresh_token:
         await auth_service.revoke_refresh_token(refresh_token)
     # Cookieleri temizle (Faz 6 Fix: Ghost Cookies)
-    is_prod = settings.ENVIRONMENT == "production"
-    cookie_params = {
-        "path": "/",
-        "httponly": True,
-        "secure": is_prod,
-        "samesite": "lax",
-    }
+    cookie_params = _get_cookie_delete_params()
     response.delete_cookie("access_token", **cookie_params)
     response.delete_cookie("refresh_token", **cookie_params)
 
@@ -5910,9 +6263,10 @@ async def delete_account(
             detail="Sifre hatali veya hesap silinemedi.",
         )
 
-    # Cookieleri temizle
-    response.delete_cookie("access_token")
-    response.delete_cookie("refresh_token")
+    # Cookieleri temizle (KRİTİK-2 Fix: logout ile ayni parametreler)
+    cookie_params = _get_cookie_delete_params()
+    response.delete_cookie("access_token", **cookie_params)
+    response.delete_cookie("refresh_token", **cookie_params)
 
     return {"message": "Hesabiniz ve tum verileriniz basariyla silindi."}
 
@@ -6185,7 +6539,7 @@ async def get_match_detail(
 --- DOSYA: schemas\analytics.py ---
 """Telemetri / analitik veri transfer objeleri."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -6200,13 +6554,13 @@ class RequestLog(BaseModel):
     process_time_ms: float
     ip_address: str = ""
     user_agent: str = ""
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 --- DOSYA: schemas\auth.py ---
 """Kimlik dogrulama veri transfer objeleri."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, EmailStr, Field
@@ -6237,7 +6591,7 @@ class UserInDB(BaseModel):
     tier: UserTier = UserTier.STANDARD
     is_verified: bool = False
     is_superuser: bool = False
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login_at: datetime | None = None
 
     model_config = {"from_attributes": True, "populate_by_name": True}
@@ -6696,7 +7050,8 @@ class AnalysisService:
             try:
                 # MongoDB aggregation 'distance' alanını hesaplayıp içine koydu
                 dist = doc.get("distance", 0.0)
-                sim_pct = max(0.0, 100.0 - (dist * 33.3))
+                # ÖNEMLİ-4 Fix: Lineer olcekleme — threshold'da %0, dist=0'da %100
+                sim_pct = max(0.0, (1 - dist / DISTANCE_THRESHOLD) * 100)
 
                 results.append(
                     SimilarMatchResult(
@@ -6972,7 +7327,7 @@ class AuthService:
             if not email or token_type != "email_verify":
                 return False
             user = await self.repo.get_by_email(email)
-            if not user:
+            if not user or not user.id:
                 return False
             return await self.repo.verify_user(user.id)
         except PyJWTError:
@@ -7056,6 +7411,8 @@ class AuthService:
         if not user or not await self.verify_password(password, user.hashed_password):
             return False
         
+        # Tum aktif refresh token'lari Redis'ten temizle (KRİTİK-1 Fix)
+        await self.revoke_all_user_tokens(user_id)
         return await self.repo.delete(user_id)
 
 
@@ -7072,6 +7429,8 @@ from repositories.user_repository import UserRepository
 from schemas.auth import UserTier, UserInDB
 from services.payment.base import BasePaymentProvider
 from services.auth_service import pwd_context  # S-07 Fix: Tek merkezi pwd_context
+from clients.telegram_client import telegram_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -7081,7 +7440,8 @@ class BillingService:
     def __init__(self, user_repo: UserRepository, provider: BasePaymentProvider):
         self.repo = user_repo
         self.provider = provider
-        self.redis = redis_manager.get_client()
+        # KALİTE-2 Fix: Constructor'da redis baglantisi cekilmez,
+        # her metod cagrisinda redis_manager.get_client() kullanilir.
 
     async def create_checkout_session(
         self,
@@ -7105,7 +7465,9 @@ class BillingService:
         reg_data["hashed_password"] = await asyncio.to_thread(pwd_context.hash, reg_data["password"])
         del reg_data["password"]
         
-        await self.redis.setex(f"pending_reg:{temp_id}", 3600, json.dumps(reg_data))
+        redis = redis_manager.get_client()
+        # KRİTİK-4 Fix: TTL 24 saat — Webhook gecikmelerine karsi daha dayanikli
+        await redis.setex(f"pending_reg:{temp_id}", 86400, json.dumps(reg_data))
         
         return await self.provider.create_checkout_session(
             user_id=temp_id,
@@ -7134,9 +7496,18 @@ class BillingService:
 
         # Eger bu bir misafir kaydiysa (GUEST_ prefix)
         if str(user_id).startswith("guest_"):
-            reg_json = await self.redis.get(f"pending_reg:{user_id}")
+            redis = redis_manager.get_client()
+            reg_json = await redis.get(f"pending_reg:{user_id}")
             if not reg_json:
                 logger.error("Misafir kayit verisi bulunamadi: %s", user_id)
+                # KRİTİK-4 Fix: Telegram alert — odeme alindi ama kayit verisi expired
+                await telegram_client.send_alert(
+                    f"🚨 <b>GUEST CHECKOUT FAILURE</b>\n"
+                    f"Temp ID: <code>{user_id}</code>\n"
+                    f"Plan: <code>{plan_id}</code>\n"
+                    f"Neden: pending_reg verisi Redis'te bulunamadi (TTL expired veya temizlendi).\n"
+                    f"Aksiyon: Admin panelden kullanici bilgilerini kontrol edin."
+                )
                 return False
             
             reg_data = json.loads(reg_json)
@@ -7152,7 +7523,7 @@ class BillingService:
             created_user = await self.repo.create(new_user)
             if created_user:
                 logger.info("Yeni kullanici odeme sonrasi olusturuldu: %s", created_user.email)
-                await self.redis.delete(f"pending_reg:{user_id}")
+                await redis.delete(f"pending_reg:{user_id}")
                 return True
             return False
 
@@ -7208,6 +7579,7 @@ class MatchService:
         """ID'ye gore mac detayini getirir (cachelenmez)."""
         return await self.repo.get_by_external_id(external_id)
 
+    @cache_response(expire=300, key_prefix="matches:count")
     async def count_upcoming_matches(
         self, sport: str = "football", league_key: str | None = None
     ) -> int:
@@ -8501,12 +8873,14 @@ class TestRateLimiter:
 --- DOSYA: utils\cache.py ---
 """Redis caching utility (Faz 4)."""
 
+import typing
 import orjson
 from functools import wraps
 from typing import Any, Callable
 from core.redis_client import redis_manager
 from core.logger import logger
 
+from pydantic import BaseModel
 from pydantic_core import to_jsonable_python
 
 
@@ -8518,6 +8892,33 @@ def _make_serializable(data: Any) -> Any:
         return str(data)  # En kötü ihtimalle string'e çevir ki json.dumps patlamasın
 
 
+def _deserialize_cached(raw: Any, hint: Any) -> Any:
+    """Cache'ten gelen ham dict/list'i return type hint'ine gore Pydantic modele cevirir.
+
+    KRİTİK-3 Fix: Cache hit'te orjson.loads() ham dict/list doner,
+    uygulama kodu .attribute erisimi yaparsa AttributeError firlatir.
+    Bu fonksiyon return type hint'ini analiz edip uygun modele cevirir.
+    """
+    if hint is None:
+        return raw
+
+    origin = typing.get_origin(hint)
+    args = typing.get_args(hint)
+
+    # list[SomeModel] durumu
+    if origin is list and args and isinstance(raw, list):
+        model_cls = args[0]
+        if isinstance(model_cls, type) and issubclass(model_cls, BaseModel):
+            return [model_cls(**item) if isinstance(item, dict) else item for item in raw]
+        return raw
+
+    # Tekil Model durumu
+    if isinstance(hint, type) and issubclass(hint, BaseModel) and isinstance(raw, dict):
+        return hint(**raw)
+
+    return raw
+
+
 def cache_response(expire: int = 300, key_prefix: str = "cache"):
     """
     Decorator to cache FastAPI endpoint responses in Redis.
@@ -8525,6 +8926,9 @@ def cache_response(expire: int = 300, key_prefix: str = "cache"):
     """
 
     def decorator(func: Callable):
+        # Return type hint'ini analiz et (KRİTİK-3 Fix)
+        _return_hint = typing.get_type_hints(func).get("return")
+
         @wraps(func)
         async def wrapper(*args, **kwargs):
             # Generate a unique key based on function name, args, and kwargs
@@ -8551,7 +8955,8 @@ def cache_response(expire: int = 300, key_prefix: str = "cache"):
                 cached_val = await redis.get(cache_key)
                 if cached_val:
                     logger.debug(f"Cache hit: {cache_key}")
-                    return orjson.loads(cached_val)
+                    raw = orjson.loads(cached_val)
+                    return _deserialize_cached(raw, _return_hint)
             except Exception as e:
                 logger.error(f"Cache read error: {str(e)}")
 
