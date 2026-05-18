@@ -211,6 +211,12 @@ export default function Home() {
   return (
     <div className="flex flex-col gap-8">
       
+      {/* WARNING BANNER */}
+      <div className="w-full bg-yellow-500/10 border border-yellow-500/30 text-yellow-500/90 text-xs md:text-sm font-medium text-center py-3 px-4 rounded-xl shadow-[0_0_15px_rgba(234,179,8,0.1)] flex justify-center items-center gap-2">
+        <span className="text-yellow-500 text-lg">⚠️</span>
+        <span><strong>Önemli Bilgilendirme:</strong> Platformumuzdaki oranlar uluslararası Bet365 altyapısından sağlanmaktadır ve yerel (Türkiye) oranlarına kıyasla daha yüksek değerler gösterebilir.</span>
+      </div>
+
       {/* TOP ROW: RECOMMENDED MATCHES */}
       <div className="grid grid-cols-1 gap-6">
         <div className="glass rounded-[2rem] p-8 card-shadow emerald-glow relative overflow-hidden">

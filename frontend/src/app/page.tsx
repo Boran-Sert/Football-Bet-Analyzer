@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { ArrowRightIcon, ChartBarIcon, ServerStackIcon, TrophyIcon, BoltIcon } from "@heroicons/react/24/outline";
 
 export default function LandingPage() {
@@ -15,8 +16,8 @@ export default function LandingPage() {
       {/* HEADER */}
       <header className="relative z-10 flex items-center justify-between px-8 py-6 max-w-7xl mx-auto w-full">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-primary flex items-center justify-center shadow-[0_0_20px_rgba(16,185,129,0.4)]">
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z" /></svg>
+          <div className="w-18 h-18 relative">
+            <Image src="/icon.png" alt="Sports-Analyzer Logo" fill className="object-contain" />
           </div>
           <span className="text-2xl font-black tracking-tighter text-white uppercase italic">Sports-Analyzer</span>
         </div>
@@ -29,6 +30,8 @@ export default function LandingPage() {
           </Link>
         </div>
       </header>
+
+
 
       {/* HERO SECTION */}
       <main className="flex-1 flex flex-col items-center justify-center text-center px-4 relative z-10 py-20 mt-10">
@@ -114,15 +117,30 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* LEGAL DISCLAIMER */}
-      <section className="relative z-10 py-12 px-8 bg-gradient-to-b from-primary/10 to-transparent">
-        <div className="max-w-7xl mx-auto text-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-[10px] font-black uppercase tracking-widest mb-4">
-            Yasal Uyarı
+      {/* LEGAL & INFO SECTION */}
+      <section className="relative z-10 py-16 px-8 bg-gradient-to-b from-primary/10 to-transparent">
+        <div className="max-w-7xl mx-auto flex flex-col gap-12">
+
+          {/* WARNING */}
+          <div className="text-center">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/20 text-yellow-500 text-[10px] font-black uppercase tracking-widest mb-4">
+              Önemli Bilgilendirme
+            </div>
+            <p className="text-xs text-slate-500 max-w-4xl mx-auto leading-relaxed">
+              Platformumuzdaki oranlar uluslararası Bet365 altyapısından sağlanmaktadır ve yerel (Türkiye) oranlarına kıyasla daha yüksek değerler gösterebilir.
+            </p>
           </div>
-          <p className="text-xs text-slate-500 max-w-4xl mx-auto leading-relaxed">
-            Sports-Analyzer platformu, yalnızca geçmiş maç verileri ve matematiksel hesaplamalara dayalı istatistiksel sonuçlar sunar. <strong>Sistemimizde yer alan hiçbir veri, analiz veya tahmin kesinlikle bahis tavsiyesi, yönlendirme veya teşvik niteliği taşımaz.</strong> Platformumuz hiçbir şekilde bahis oynatmaz, yasadışı bahis faaliyetlerini desteklemez ve teşvik etmez. Sunulan verilerin kullanımından doğabilecek her türlü maddi/manevi zarar ve yasal sorumluluk tamamen kullanıcının kendisine aittir. Kullanıcılar bulundukları ülkenin yasalarına uymakla yükümlüdür.
-          </p>
+
+          {/* DISCLAIMER */}
+          <div className="text-center">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-red-500/10 border border-red-500/20 text-red-500 text-[10px] font-black uppercase tracking-widest mb-4">
+              Yasal Uyarı
+            </div>
+            <p className="text-xs text-slate-500 max-w-4xl mx-auto leading-relaxed">
+              Sports-Analyzer platformu, yalnızca geçmiş maç verileri ve matematiksel hesaplamalara dayalı istatistiksel sonuçlar sunar. <strong>Sistemimizde yer alan hiçbir veri, analiz veya tahmin kesinlikle bahis tavsiyesi, yönlendirme veya teşvik niteliği taşımaz.</strong> Platformumuz hiçbir şekilde bahis oynatmaz, yasadışı bahis faaliyetlerini desteklemez ve teşvik etmez. Sunulan verilerin kullanımından doğabilecek her türlü maddi/manevi zarar ve yasal sorumluluk tamamen kullanıcının kendisine aittir. Kullanıcılar bulundukları ülkenin yasalarına uymakla yükümlüdür.
+            </p>
+          </div>
+
         </div>
       </section>
 
@@ -130,8 +148,8 @@ export default function LandingPage() {
       <footer className="relative z-10 border-t border-white/10 py-8 px-8 mt-auto">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded bg-primary flex items-center justify-center">
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#000" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="m13 2-2 10h3L11 22l2-10h-3l2-10z" /></svg>
+            <div className="w-10 h-10 relative">
+              <Image src="/icon.png" alt="Sports-Analyzer Logo" fill className="object-contain" />
             </div>
             <span className="text-sm font-bold text-white uppercase italic">Sports-Analyzer</span>
           </div>
